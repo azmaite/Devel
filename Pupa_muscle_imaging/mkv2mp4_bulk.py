@@ -48,8 +48,8 @@ def mkv2mp4_bulk(folder_path=''):
         for file in files:
             if file.endswith('.mkv'):
                 # check if the matching mp4 video already exists, if so skip
-                if os.path.exists(os.path.join(root, MP4_SAVE_NAME)):
-                    print(f'MP4 video already exists for {file}, skipping...')
+                if os.path.exists(os.path.join(root, MP4_SAVE_NAME) & os.path.exists(os.path.join(root, DIF_SAVE_NAME))):
+                    print(f'Already processed {file}, skipping...')
                 else:
                     mkv_files.append(os.path.join(root, file))
     print('')
@@ -60,7 +60,7 @@ def mkv2mp4_bulk(folder_path=''):
     # convert each .mkv file to .mp4
     for i, mkv_file in enumerate(mkv_files):
         name = os.path.basename(mkv_file)
-        print(f'Converting {i+1}/{len(mkv_files)} to mp4: {name}')
+        print(f'Processing {i+1}/{len(mkv_files)}: {name}')
         _mkv2mp4(mkv_file)
 
 
@@ -138,7 +138,7 @@ def _mkv2mp4(video):
     plt.xlim(timestamps[1], timestamps[-1])
     plt.xlabel('Time (s)')
     plt.ylabel('Mean abs difference in fluorescence')
-    plt.title(video.replace(MAIN_PATH, ""))
+    plt.title(os.path.basename(video))
     
     # Save the figure
     plt.savefig(os.path.join(dir, DIF_SAVE_NAME), dpi=300)
