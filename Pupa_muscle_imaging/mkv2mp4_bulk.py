@@ -1,6 +1,6 @@
-""" Function to generate small mp4 files from all the raw .mkv videos in a folder.
-Also save a diff image with the overall change in intensity across the video, 
-to help with quick visualization of the data.
+""" Function to generate "small" mp4 files from all the raw .mkv videos in a folder.
+Also save an image with the overall change in fluorescence intensity across the video, 
+to help with quick visualization of the data (and to know when activity happened).
 
 Example usages from the terminal: 
         python3 mkv2mp4_bulk.py
