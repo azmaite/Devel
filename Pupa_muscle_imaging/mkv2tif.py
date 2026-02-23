@@ -51,6 +51,11 @@ def mkv2tif(video_path, resize_factor, chunk_dur_min, chunk_num=0, crop=None, hz
 
     frames_per_frame = 4 # each frame in the video includes 4 real frames (4 channels)
     
+    # get the number of frames per chunk
+    chunk_frames = chunk_dur_min * 60 * hz / 4 # divide by 4 cause each frame includes 4 real frames
+    # get the closest multiple of frames_per_frame
+    chunk_frames = int(np.round(chunk_frames / frames_per_frame) * frames_per_frame)
+    
     # set the edges of the chunks
     if chunk_num == 0:
         chunk_num = 100
@@ -71,11 +76,6 @@ def mkv2tif(video_path, resize_factor, chunk_dur_min, chunk_num=0, crop=None, hz
     
     # initialize list of tiff file paths
     tif_paths = []
-
-    # get the number of frames per chunk
-    chunk_frames = chunk_dur_min * 60 * hz / 4 # divide by 4 cause each frame includes 4 real frames
-    # get the closest multiple of frames_per_frame
-    chunk_frames = int(np.round(chunk_frames / frames_per_frame) * frames_per_frame)
 
     # initialize frames list    
     frames = []
@@ -105,7 +105,7 @@ def mkv2tif(video_path, resize_factor, chunk_dur_min, chunk_num=0, crop=None, hz
                 from skimage.transform import resize
                 Y, X = img_cropped.shape
                 img_resized = resize(
-                    img_i,
+                    img_cropped,
                     (Y//resize_factor, X//resize_factor),
                     order=1,              # bilinear (good tradeoff)
                     preserve_range=True,
