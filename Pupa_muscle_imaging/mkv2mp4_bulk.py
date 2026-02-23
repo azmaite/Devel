@@ -52,6 +52,10 @@ def mkv2mp4_bulk(folder_path=''):
                     print(f'MP4 video already exists for {file}, skipping...')
                 else:
                     mkv_files.append(os.path.join(root, file))
+    print('')
+
+    # sort the mkv files by name
+    mkv_files.sort()
 
     # convert each .mkv file to .mp4
     for i, mkv_file in enumerate(mkv_files):
