@@ -58,7 +58,6 @@ def mkv2mp4_bulk(folder_path=''):
         name = os.path.basename(mkv_file)
         print(f'Converting {i+1}/{len(mkv_files)} to mp4: {name}')
         _mkv2mp4(mkv_file)
-        print('ok 2')
 
 
 
