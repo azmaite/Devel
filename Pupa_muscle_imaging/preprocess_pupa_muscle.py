@@ -78,17 +78,23 @@ def preprocess_pupa_muscle(folder_path=''):
     print('')
 
     # process each image - only if not already done
-    for i, mkv_file in enumerate(mkv_files_todo):
-        name = os.path.basename(mkv_file)
-        print(f'Processing {i+1}/{len(mkv_files)}: {name}')
-        _preprocess(mkv_file)
+    if len(mkv_files_todo) == 0:
+        print('All videos already processed, make grid image.')
+    else:
+        for i, mkv_file in enumerate(mkv_files_todo):
+            name = os.path.basename(mkv_file)
+            print(f'Processing {i+1}/{len(mkv_files_todo)}: {name}')
+            _preprocess(mkv_file)
 
     # save grid image (if there are subfolders)
     if len(mkv_files) > 1:
 
+        # get the number of subplot columns needed (4 rows)
+        rows = 4
+        cols = int(np.ceil(len(mkv_files) / rows))
 
         # plot grid of max projection image for each video
-        fig, axes = plt.subplots(4, 11, figsize=(22, 12))
+        fig, axes = plt.subplots(rows, cols, figsize=(22, 12))
         axes = axes.flatten()
 
         for i, vid in enumerate(mkv_files):
