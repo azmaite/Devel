@@ -215,6 +215,9 @@ def _preprocess(video):
 
     # save the overall fluorescence across the video as a png image
     act = np.array(act)
+    if len(timestamps) != len(act):
+        print(f'Warning: number of timestamps ({len(timestamps)}) does not match number of frames ({len(act)}), LOST FRAMES.')
+        timestamps = timestamps[:len(act)]  # trim timestamps to match the number of frames
     plt.figure(figsize=(10, 3))
     plt.plot(timestamps/60, act, linewidth=0.5) # in minutes
     plt.xlim(0, timestamps[-1]/60)
