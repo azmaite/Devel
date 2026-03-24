@@ -247,7 +247,7 @@ def _preprocess(video):
     # save as h5 file (without clipping, for analysis)
     h5_path = os.path.join(dir, H5_SAVE_NAME)
     with h5py.File(h5_path, 'w') as f:
-        f.create_dataset('max_proj', data=max_proj_clip)
+        f.create_dataset('max_proj', data=max_proj)
         f.create_dataset('min_proj', data=min_proj)
 
 
