@@ -20,6 +20,7 @@ import cv2
 import h5py
 import datetime
 import argparse
+import h5py
 
 import matplotlib
 matplotlib.use('Agg')  # Force Matplotlib to use a non-interactive backend
@@ -32,6 +33,7 @@ MP4_SAVE_NAME = 'summary_video.mp4'
 ACT_SAVE_NAME = 'activity.png'
 MIN_SAVE_NAME = 'min_projection.png'
 MAX_SAVE_NAME = 'max_projection.png'
+H5_SAVE_NAME = 'max_min_proj.h5'
 FIGS_FOLDER = '00_Figs'
 GRID_SAVE_NAME = 'max_projection_grid.png'
 
@@ -232,7 +234,7 @@ def _preprocess(video):
     plt.close()
 
 
-    # save the max projection and min projection images (clip for visualization)
+    # save the max projection and min projection images as png (clip for visualization)
     clip = 800
     max_proj_clip = np.clip(max_proj, 0, clip) / clip * 255
     max_proj_clip = max_proj_clip.astype(np.uint8)
@@ -241,6 +243,12 @@ def _preprocess(video):
     min_proj_clip = min_proj_clip.astype(np.uint8)
     cv2.imwrite(os.path.join(dir, MAX_SAVE_NAME), max_proj_clip)
     cv2.imwrite(os.path.join(dir, MIN_SAVE_NAME), min_proj_clip)
+
+    # save as h5 file (without clipping, for analysis)
+    h5_path = os.path.join(dir, H5_SAVE_NAME)
+    with h5py.File(h5_path, 'w') as f:
+        f.create_dataset('max_proj', data=max_proj_clip)
+        f.create_dataset('min_proj', data=min_proj)
 
 
 
