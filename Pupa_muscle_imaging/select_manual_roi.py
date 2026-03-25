@@ -112,8 +112,11 @@ def select_manual_roi(video_path):
         bounding_boxes.append([x, y, w, h])
 
     
-    # save in an h5 file
-    h5_file = video_path.replace('.mkv', '_segment_rois.h5')
+
+
+    # save in an h5 file - in main folder
+    fly_folder = os.path.dirname(os.path.dirname(video_path))
+    h5_file = os.path.join(fly_folder, 'segment_rois.h5')
     # if h5 file doesn't exist, create it. If it does exist, add the new rois to it 
     if os.path.exists(h5_file):
         with h5py.File(h5_file, 'a') as f:
