@@ -41,46 +41,6 @@ def _set_colors_by_segment():
 
     return colors_dict
 
-def _get_points_and_colors(coordinates_dict):
-    """ Define which segments to plot and in which order,
-    joining the corresponding coordinates into a single array for plotting 
-    and assign colors based on segment type to each point. """
-
-    # set plot order    
-    plot_order = ['Hind COXA', 'Hind TROCHANTER', 'Mid COXA', 'Mid TROCHANTER', 'Mid TIBIA', 
-                  'Front COXA', 'Front TROCHANTER', 'Front FEMUR', 'Front TIBIA']
-    
-    # edit segment names to match those in coordinates_dict
-    plot_order = [s.replace(' ', ' leg ') for s in plot_order]
-
-    # repeat for Left and Right legs
-    plot_order = [f"{side} {seg}" for seg in plot_order for side in ['Left', 'Right']]
-
-    # get color dictionary
-    colors_dict = _set_colors_by_segment()
-
-    # join coordinates in plot order, and assign colors to each point based on segment type
-    points_3d = []
-    points_color = []
-    for seg in plot_order:
-        segment_points = coordinates_dict[seg]
-
-        # subsample to half the points randomly to reduce clutter (except COXA which has fewer points)
-        if 'COXA' not in seg:
-            indices = np.random.choice(segment_points.shape[0], size=segment_points.shape[0]//2, replace=False)
-            segment_points = segment_points[indices]
-
-        points_3d.append(segment_points)
-        segment_name_short = f'{seg.split()[1]} {seg.split()[3]}'   # e.g. "Hind COXA" from "Left Hind leg COXA"
-        # assign same color to all points in segment
-        color = colors_dict[segment_name_short]
-        points_color.append(np.tile(color, (segment_points.shape[0], 1)))  
-
-    # concatenate all points and colors into single arrays
-    points_3d = np.concatenate(points_3d, axis=0)
-    points_color = np.concatenate(points_color, axis=0)
-    
-    return points_3d, points_color
 
 
 def _alpha_shape(points, alpha=0.04):
@@ -121,51 +81,71 @@ def _alpha_shape(points, alpha=0.04):
 
 
 def interactive_alignment(image, points_3d):
+    # points_3d is a dictionary with keys = segments
 
-    # check if points_3d is a dict of segments or already a single array of points
-    if isinstance(points_3d, dict):
-        points_3d, colors = _get_points_and_colors(points_3d)
-    else:
-        colors = None
+    # set what segments to plot and in what order order   
+    #plot_order = ['Hind COXA', 'Hind TROCHANTER', 'Mid COXA', 'Mid TROCHANTER', 'Mid TIBIA', 
+    #              'Front COXA', 'Front TROCHANTER', 'Front FEMUR', 'Front TIBIA']
+    plot_order = ['Mid TIBIA', 'Front COXA', 'Front TROCHANTER', 'Front FEMUR', 'Front TIBIA']
+    plot_order = [s.replace(' ', ' leg ') for s in plot_order]
+    plot_order = [f"{side} {seg}" for seg in plot_order for side in ['Left', 'Right']]
 
+    # get colors for each segment
+    colors_dict_0 = _set_colors_by_segment()
+    colors_dict = {seg: colors_dict_0[f"{seg.split()[1]} {seg.split()[3]}"] for seg in plot_order}  # e.g. "Hind COXA" from "Left Hind leg COXA"
 
+    # initial plot
     fig, ax = plt.subplots(figsize=(18, 8))
     plt.subplots_adjust(right=0.75, left=0)
-    
-    # Initial Plot
     ax.imshow(image, cmap='gray')
-    scatter = ax.scatter([], [], s=1, alpha=0.6, c=[] if colors is not None else 'red')
-    ax.set_title("Align 3D Object (Red) to Image\nClose window or click 'Done' to finish")
+    ax.set_title("Align 3D legs to min projection image.  Close window or click 'Done' to finish")
 
 
-    # create a persistant reference for the outline plot
-    outline_plot, = ax.plot([], [], 'k-', lw=2, zorder=5)
+    # create a persistant reference for the outline plots for each segment
+    outline_plots = {segment: ax.plot([], [], color=colors_dict[segment], lw=1, zorder=5)[0] for segment in plot_order} 
 
-    # create a timer
-    timer = fig.canvas.new_timer(interval=200)  
+    # create a timer (to avoid lag while dragging sliders, we will only update the outlines after a short delay once the sliders stop moving)
+    timer = fig.canvas.new_timer(interval=50)  
 
-    def compute_and_draw_hull():
-        """ only runs when the timer finishes """
+    def compute_and_draw_outlines():
+        """ only runs when the timer finishes """s
 
         # get current transformation values from sliders
         s = s_scale.val
         rx, ry, rz = s_rx.val, s_ry.val, s_rz.val
         tx, ty = s_tx.val, s_ty.val
 
-        # Transform points
-        p_transformed = _rotate_points(points_3d * s, rx, ry, rz)
-        x_proj = p_transformed[:, 0] + tx
-        y_proj = p_transformed[:, 1] + ty
-        points_2d = np.column_stack((x_proj, y_proj))
+        # Transform points for each segment
+        for segment in plot_order:
+            segment_points = points_3d[segment]
+            p_transformed = _rotate_points(segment_points * s, rx, ry, rz)
+            x_proj = p_transformed[:, 0] + tx
+            y_proj = p_transformed[:, 1] + ty
+            points_2d = np.column_stack((x_proj, y_proj))
 
-        # Compute alpha shape and plot
-        outline = _alpha_shape(points_2d, alpha=0.04)
-        outline_plot.set_data(outline[:, 0], outline[:, 1])  
+            outline = _alpha_shape(points_2d, alpha=0.04)
+            outline_plots[segment].set_data(outline[:, 0], outline[:, 1])  # update the existing Line2D object with new outline coordinates
 
         fig.canvas.draw_idle()  # redraw the figure to show the updated hull
 
-    # link the timer to the hull function
-    timer.add_callback(compute_and_draw_hull)
+    # link the timer to the outline function
+    timer.add_callback(compute_and_draw_outlines)
+
+
+
+    # create a single-shot timer for peek-a-boo effect (hide outlines when button is pressed)
+    peek_timer = fig.canvas.new_timer(interval=200)
+    peek_timer.single_shot = True
+
+    # set function to show outlines after peek_timer finishes
+    def show_outlines():
+        for plot in outline_plots.values():
+            plot.set_visible(True)
+        fig.canvas.draw_idle()
+
+    # link the peek_timer to the show_outlines function
+    peek_timer.add_callback(show_outlines)
+
         
 
     # Slider Axes
@@ -179,8 +159,8 @@ def interactive_alignment(image, points_3d):
 
     # Sliders
     s_scale = Slider(ax_scale, 'Scale', 0.3, 1.5, valinit=0.6, valstep=0.01, valfmt='%.2f')
-    s_rx = Slider(ax_rx, 'Rot X', -90, 270, valinit=90, valstep=1, valfmt='%d°')
-    s_ry = Slider(ax_ry, 'Rot Y', -180, 180, valinit=0, valstep=1, valfmt='%d°')
+    s_rx = Slider(ax_rx, 'Rot X', 0, 180, valinit=90, valstep=1, valfmt='%d°')
+    s_ry = Slider(ax_ry, 'Rot Y', -90, 90, valinit=0, valstep=1, valfmt='%d°')
     s_rz = Slider(ax_rz, 'Rot Z', -270, 90, valinit=-90, valstep=1, valfmt='%d°')
     s_tx = Slider(ax_tx, 'Shift X', 0, image.shape[1], valinit=image.shape[1]//2, valstep=1, valfmt='%d')
     s_ty = Slider(ax_ty, 'Shift Y', 0, image.shape[0], valinit=image.shape[0]//2, valstep=1, valfmt='%d')
@@ -191,19 +171,6 @@ def interactive_alignment(image, points_3d):
         # stop the timer every time the sliders are moved
         timer.stop()
 
-        # Transform
-        p_transformed = _rotate_points(points_3d * s_scale.val, s_rx.val, s_ry.val, s_rz.val)
-        
-        # Project and Shift
-        x_proj = p_transformed[:, 0] + s_tx.val
-        y_proj = p_transformed[:, 1] + s_ty.val
-        
-        scatter.set_offsets(np.column_stack((x_proj, y_proj)))
-
-        # add colors if available
-        if colors is not None:
-            scatter.set_color(colors)
-
         # restart the stimer. If 5000ms pass without the sliders being moved again, the hull will be computed and drawn
         timer.start()
 
@@ -213,19 +180,36 @@ def interactive_alignment(image, points_3d):
     for s in [s_scale, s_rx, s_ry, s_rz, s_tx, s_ty]:
         s.on_changed(update)
 
+
+
     # Reset Button
     button_height = 0.35
-    first_button_x = 0.775
+    first_button_x = 0.735
     reset_ax = plt.axes([first_button_x, button_height, 0.07, 0.04])
-    btn_reset = Button(reset_ax, 'Reset', color='lightgray', hovercolor='0.975')
+    btn_reset = Button(reset_ax, 'Reset', color='lightgray', hovercolor='gray')
 
     def reset(event):
         for s in [s_scale, s_rx, s_ry, s_rz, s_tx, s_ty]:
             s.reset()
     btn_reset.on_clicked(reset)
 
-    # --- THE DONE BUTTON ---
-    done_ax = plt.axes([first_button_x + 0.08, button_height, 0.07, 0.04])
+    # Peek Button
+    peek_ax = plt.axes([first_button_x + 0.08, button_height, 0.07, 0.04])
+    btn_peek = Button(peek_ax, 'Hide outlines', color='lightblue', hovercolor='dodgerblue')
+
+    def peek(event):
+        # hide outlines
+        for plot in outline_plots.values():
+            plot.set_visible(False)
+        fig.canvas.draw_idle()
+
+        # start timer to show outlines again after a short delay
+        peek_timer.start()
+    
+    btn_peek.on_clicked(peek)
+
+    # Done button
+    done_ax = plt.axes([first_button_x + 0.08*2, button_height, 0.07, 0.04])
     btn_done = Button(done_ax, 'Done', color='#90EE90', hovercolor='#32CD32')
 
     def done(event):
