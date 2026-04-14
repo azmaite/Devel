@@ -1,3 +1,7 @@
+# any files containing 'test', temporary files used for development or testing
+*test*
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
