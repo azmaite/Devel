@@ -1,6 +1,9 @@
 # any files containing 'test', temporary files used for development or testing
 *test*
 
+# ignore .vscode directory, which contains local settings for Visual Studio Code
+.vscode/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
