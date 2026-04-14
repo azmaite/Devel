@@ -108,7 +108,7 @@ def interactive_alignment(image, points_3d):
     timer = fig.canvas.new_timer(interval=50)  
 
     def compute_and_draw_outlines():
-        """ only runs when the timer finishes """s
+        """ only runs when the timer finishes """
 
         # get current transformation values from sliders
         s = s_scale.val
