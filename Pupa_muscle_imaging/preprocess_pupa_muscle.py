@@ -33,6 +33,7 @@ MP4_SAVE_NAME = 'summary_video.mp4'
 ACT_SAVE_NAME = 'activity.png'
 MIN_SAVE_NAME = 'min_projection.png'
 MAX_SAVE_NAME = 'max_projection.png'
+MEDIAN_SAVE_NAME = 'median.png'
 H5_SAVE_NAME = 'max_min_proj.h5'
 FIGS_FOLDER = '00_Figs'
 GRID_SAVE_NAME = 'max_projection_grid.png'
@@ -85,7 +86,8 @@ def preprocess_pupa_muscle(folder_path=''):
     else:
         for i, mkv_file in enumerate(mkv_files_todo):
             name = os.path.basename(mkv_file)
-            print(f'Processing {i+1}/{len(mkv_files_todo)}: {name}')
+            # print the name of the video being processed and the time
+            print(f'{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {i+1}/{len(mkv_files_todo)}: {name}')
             _preprocess(mkv_file)
 
     # save grid image (if there are subfolders)
@@ -177,6 +179,9 @@ def _preprocess(video):
     max_proj = np.zeros_like(frame_0, dtype=np.uint16)
     min_proj = np.full_like(frame_0, fill_value=65535, dtype=np.uint16)
 
+    # initialize the frames list to save the frames for median calculation
+    frames_array = np.zeros((24000, frame_0.shape[0], frame_0.shape[1]), dtype=np.uint16)
+
     # Define the codec and create VideoWriter object for the mp4 video
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     mp4_path = os.path.join(dir, MP4_SAVE_NAME)
@@ -187,6 +192,7 @@ def _preprocess(video):
     stream = container.streams.video[0]
     stream.thread_type = "AUTO" 
 
+    n = 0
     for frame in container.decode(stream):
 
         # extract 4 channels (each frame includes 4 real frames)
@@ -198,21 +204,29 @@ def _preprocess(video):
             # get mean activity
             act.append(np.mean(img[:,:,j].astype(np.int32)))
 
+            # add to frames list for median calculation
+            frames_array[n] = img_i
+
             # convert to uint8 by normalizing 0-255 (for mp4 video)
             clip = 600
-            img_i = np.clip(img_i, 0, clip) / clip * 255
-            img_i = img_i.astype(np.uint8)
+            img_i_mp4 = np.clip(img_i, 0, clip) / clip * 255
+            img_i_mp4 = img_i_mp4.astype(np.uint8)
 
             # save to video
-            mp4.write(cv2.cvtColor(img_i, cv2.COLOR_RGB2BGR))
+            mp4.write(cv2.cvtColor(img_i_mp4, cv2.COLOR_RGB2BGR))
 
             # update max projection and min projection
             max_proj = np.maximum(max_proj, img[...,j])
             min_proj = np.minimum(min_proj, img[...,j])
 
+            n += 1
+
 
     mp4.release()
     container.close()
+
+    # get median frame
+    median_frame = np.median(frames_array, axis=0)
 
 
     # save the overall fluorescence across the video as a png image
@@ -234,21 +248,27 @@ def _preprocess(video):
     plt.close()
 
 
-    # save the max projection and min projection images as png (clip for visualization)
+    # save the max projection and min projection images as png (clip for visualization) as well as the median
     clip = 800
     max_proj_clip = np.clip(max_proj, 0, clip) / clip * 255
     max_proj_clip = max_proj_clip.astype(np.uint8)
     clip = 600
     min_proj_clip = np.clip(min_proj, 0, clip) / clip * 255
     min_proj_clip = min_proj_clip.astype(np.uint8)
+    median_clip = np.clip(median_frame, 0, clip) / clip * 255
+    median_clip = median_clip.astype(np.uint8)
+
     cv2.imwrite(os.path.join(dir, MAX_SAVE_NAME), max_proj_clip)
     cv2.imwrite(os.path.join(dir, MIN_SAVE_NAME), min_proj_clip)
+    cv2.imwrite(os.path.join(dir, MEDIAN_SAVE_NAME), median_clip)
+
 
     # save as h5 file (without clipping, for analysis)
     h5_path = os.path.join(dir, H5_SAVE_NAME)
     with h5py.File(h5_path, 'w') as f:
         f.create_dataset('max_proj', data=max_proj)
         f.create_dataset('min_proj', data=min_proj)
+        f.create_dataset('median', data=median_frame)
 
 
 
