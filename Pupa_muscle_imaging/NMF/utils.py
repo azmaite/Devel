@@ -38,8 +38,11 @@ import tqdm
 
 ### MASKING AND UNMASKING FUNCTIONS ###
 
-def mask_image(image, mask):
+def mask_image(image, mask, bounding_box=None):
     """Extract 1D array of image values under the mask."""
+    if bounding_box is not None:
+        x, y, w, h = bounding_box
+        mask = mask[y:y+h, x:x+w]
     return image[mask.astype(bool)]
 
 def unmask_image(values, mask, bounding_box=None):
@@ -55,9 +58,9 @@ def unmask_image(values, mask, bounding_box=None):
         
     return result
 
-def mask_video(video, mask):
+def mask_video(video, mask, bounding_box=None):
     """Apply mask to each frame of video, returning 2D array of masked values."""
-    return np.array([mask_image(frame, mask) for frame in video])
+    return np.array([mask_image(frame, mask, bounding_box) for frame in video])
 
 def unmask_video(masked_frames, mask, bounding_box=None):
     """Reconstruct video from masked frames, using unmask_image for each frame."""
