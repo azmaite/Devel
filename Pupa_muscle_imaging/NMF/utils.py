@@ -10,7 +10,7 @@ Utility functions for NMF muscle roi detection. Includes functions for:
 - running NMF and selecting/processing frames for NMF
     frames_flat_dif_norm = diff_norm_frames (frames_flat, min_proj_flat=None)
     W_temp = nmf_get_temporal (frames, H, **nmf_kwargs):
-    W_temp, H_spat = fit_nmf (frames, n_components, selected_idx=None, **nmf_kwargs)
+    W_temp, H_spat, W_temp_orig = fit_nmf (frames, n_components, selected_idx=None, **nmf_kwargs)
     var_explained = nmf_variance_explained (V, W, H)
     selected_idx = select_most_different_frames (frames_flat_dif_norm, n_select=200)
     
@@ -68,16 +68,20 @@ def unmask_video(masked_frames, mask, bounding_box=None):
 ### RUNNING NMF FUNCTIONS ###
 # W=temporal components, H=spatial components
 
-def diff_norm_frames(frames, min_proj=None):
-    """ For each frame, get the difference from the min projection across all frames,
+def diff_norm_frames(frames, background_img=None):
+    """ For each frame, get the difference from the background image (median frame or min_proj) across all frames,
     and normalize the difference from 0 to 1 (ignoring nans). This can help to enhance the signal for NMF.
     Frames can be flat or not."""
     
-    if min_proj is None:
-        min_proj = np.nanmin(frames, axis=0)
+    if background_img is None:
+        background_img = np.nanmin(frames, axis=0)
+        print('Using min projection as background image for frame differencing')
 
     # get diff from min projection for each frame
-    frames_dif = frames - min_proj
+    frames_dif = frames - background_img
+
+    # clip negative values to 0 (since we are only interested in differences above background)
+    frames_dif[frames_dif < 0] = 0
 
     # normalize each frame dif from 0 to 1 (ignore nans)
     frames_dif_norm = (frames_dif - np.nanmin(frames_dif)) / (np.nanmax(frames_dif) - np.nanmin(frames_dif))
@@ -95,7 +99,8 @@ def nmf_get_temporal(frames, H, **nmf_kwargs):
     
     #run
     model = NMF(**kwargs)
-    model.components_ = H.astype(np.float32) # lock the spatial components to those learned from the selected frames
+    frames_type = type(frames[0,0])
+    model.components_ = H.astype(frames_type) # lock the spatial components to those learned from the selected frames
     W = model.transform(frames) #solve for W using all frames
     
     return W
@@ -115,22 +120,19 @@ def fit_nmf(frames, n_components, selected_idx=None, **nmf_kwargs):
     kwargs = dict(n_components=n_components, max_iter=2000, init='random', random_state=0)
     kwargs.update(nmf_kwargs)
     # run initial NMF on selected frames to learn spatial components
-    model = NMF(**nmf_kwargs)
-    W = model.fit_transform(frames[selected_idx])
+    model = NMF(**kwargs)
+    W_orig = model.fit_transform(frames[selected_idx])
     H = model.components_
-
     # if not all frames were used for fitting, we need to get temporal components from all frames
     if len(selected_idx) < frames.shape[0]:
-
         # set default NMF parameters, which can be overridden by user input
         kwargs = dict(n_components=n_components, max_iter=2000, init='custom')
         kwargs.update(nmf_kwargs)
         kwargs.update({'init': 'custom'}) # make sure for this second step we use the custom initialization regardless of user input
-
         # Get temporal components
-        W = nmf_get_temporal(frames, H, **nmf_kwargs)
+        W = nmf_get_temporal(frames, H, **kwargs)
     
-    return W, H # W=temporal components, H=spatial components
+    return W, H, W_orig # W=temporal components, H=spatial components
 
 
 def nmf_variance_explained(V, W, H): 
@@ -193,13 +195,13 @@ def _check_order(order, n_components):
     # check that the number of non-nan elements in order matches the number of n_components
     assert np.sum(~np.isnan(order)) == n_components, 'Order must have as many non-nan elements as components'
     
-    # check that all non-nan elements are unique and between 1 and n_components 
+    # check that all non-nan elements are unique and between 0 and n_components 
     order = np.array(order)
     non_nan = order[~np.isnan(order)].astype(int)
-    assert np.array_equal(np.sort(non_nan), np.arange(1, n_components+1)), 'All non-nan elements must be unique and go from 1 to n_components'
+    assert np.array_equal(np.sort(non_nan), np.arange(0, n_components)), 'All non-nan elements must be unique and go from 0 to n_components'
 
 
-def plot_temporal_components(W, timestamps=None, order=None, color=None, norm=True, fig=None, xlims=None):
+def plot_temporal_components(W, timestamps=None, order=None, color=None, norm=False, fig=None, xlims=None):
     """ Plot the temporal components as line plots, with options for ordering, coloring, and normalization."""
 
     if timestamps is None:
@@ -241,7 +243,7 @@ def plot_temporal_components(W, timestamps=None, order=None, color=None, norm=Tr
     if xlims is not None:
         plt.xlim(xlims)
     else:
-        plt.xlims(timestamps[0], timestamps[-1])
+        plt.xlim(timestamps[0], timestamps[-1])
 
     if not fig:
         plt.show()
@@ -255,7 +257,6 @@ def plot_spatial_components(H, mask, bounding_box, roi=None, order=None):
     else:
         # check that order is valid
         _check_order(order, H.shape[0])
-        order = [ord-1 for ord in order]
 
     
     # set number of rows and image size based on number of components
@@ -396,7 +397,7 @@ def load_mkv_roi(mkv_file, roi_names, masks, bounding_boxes=None):
     """ Given an mkv file, load:
         - the video frames for each roi in roi_names, applying the corresponding mask to each frame
             so that only pixels within the mask are included and flattened
-        - the min projection across all frames from the given rois
+        - the median frame (from h5 file), flattened to match the masked frames, to use for NMF frame selection and normalization
         If bounding boxes are provided, it also returns the frames cropped to the bounding box but without removing pixels outside the mask
             *boungind box should be in format (x, y, w, h) and should be provided for each roi in roi_names*
     """
@@ -405,9 +406,12 @@ def load_mkv_roi(mkv_file, roi_names, masks, bounding_boxes=None):
     for roi_name in roi_names:
         assert roi_name in masks, f'ROI for {roi_name} not found in masks'
 
+    # load median frame from h5 file
+    median_frame = load_median_frame(mkv_file)
+
     n = 24000 # length of video (10 min at 40 fps)
     all_frames_flat = {}
-    min_proj_flat = {}
+    median_flat = {}
     if bounding_boxes is not None:
         # check that all roi_names are in bounding_boxes
         for roi_name in roi_names:
@@ -433,16 +437,18 @@ def load_mkv_roi(mkv_file, roi_names, masks, bounding_boxes=None):
                     # initialize arrays for this roi if not already done
                     if roi_name not in all_frames_flat:
                         all_frames_flat[roi_name] = np.zeros((n, pixels), dtype=np.float32)
-                        min_proj_flat[roi_name] = np.full(pixels, np.inf, dtype=np.float32)  
+                        # min_proj_flat[roi_name] = np.full(pixels, np.inf, dtype=np.float32)  
                         if bounding_boxes is not None:
                             all_frames_square[roi_name] = np.zeros((n, bounding_boxes[roi_name][3], bounding_boxes[roi_name][2]), dtype=np.float32) 
-                    
+
+                        # also save the median frame flattened to match the masked frames
+                        median_flat[roi_name] = mask_image(median_frame, mask)
+
+
                     # Apply mask (pixels outside ROI become nan)
                     masked_flat = mask_image(img, mask)
-                    all_frames_flat[roi_name][i] = masked_flat
+                    all_frames_flat[roi_name][i] = masked_flat      
 
-                    # Update min projection
-                    min_proj_flat[roi_name] = np.minimum(min_proj_flat[roi_name], masked_flat)
 
                     # if bounding box provided, also save the square frames cropped to the bounding box but without masking
                     if bounding_boxes is not None:
@@ -457,7 +463,7 @@ def load_mkv_roi(mkv_file, roi_names, masks, bounding_boxes=None):
     container.close()
 
     if bounding_boxes is not None:
-        return all_frames_flat, min_proj_flat, all_frames_square
+        return all_frames_flat, median_flat, all_frames_square
     else:
-        return all_frames_flat, min_proj_flat
+        return all_frames_flat, median_flat
 
