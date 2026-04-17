@@ -19,9 +19,9 @@ Utility functions for NMF muscle roi detection. Includes functions for:
     plot_spatial_components(H, mask, bounding_box, roi, order=None)
     
 - loading data from mkv files and corresponding h5 files with rois, masks, bounding boxes, and timestamps
-    mkv_list =  get_mkv_list()
+    mkv_list =  get_mkv_list(folder_path=None)
     rois, masks, bounding_boxes, segment_names = load_segment_rois(mkv_file)
-    timestamps = load_timestamps(mkv_file)
+    timestamps, fps = load_timestamps(mkv_file)
     min_proj, max_proj = load_min_max_proj(mkv_file)
     frames_flat, min_proj_flat, (frames_square) = load_mkv_roi(mkv_file, roi_names, masks, bounding_boxes=None)
     
@@ -237,6 +237,9 @@ def plot_temporal_components(W, timestamps=None, order=None, color=None, norm=Fa
                 plt.plot(timestamps, temp+i, label=f'Comp {ord}', linewidth=1)
             
     plt.ylim(-0.5, len(order)+0.5)
+    # set the order # as the y tick labels
+    if order is not None:
+        plt.yticks(np.arange(len(order)), [f'Comp {int(ord)}' if not np.isnan(ord) else '' for ord in order])
     plt.xlabel('Time (s)')
     plt.ylabel('Component Activation')
     plt.title('Temporal Components from NMF')
@@ -290,18 +293,19 @@ def plot_spatial_components(H, mask, bounding_box, roi=None, order=None):
 
 ### LOADING DATA FUNCITONS ###
 
-def get_mkv_list():
+def get_mkv_list(folder_path=None):
     """Open a file dialog to select a folder, returning a list
     of all mkv files within it and its subfolders."""
 
-    import tkinter as tk
-    from tkinter import filedialog
+    if folder_path is None:
+        import tkinter as tk
+        from tkinter import filedialog
 
-    main_path = '/mnt/labserver/data/MA/Development_project/Pupa_muscle_long_recordings'
+        main_path = '/mnt/labserver/data/MA/Development_project/Pupa_muscle_long_recordings'
 
-    root = tk.Tk()
-    root.withdraw()
-    folder_path = filedialog.askdirectory(initialdir=main_path, title='Select folder containing recordings')
+        root = tk.Tk()
+        root.withdraw()
+        folder_path = filedialog.askdirectory(initialdir=main_path, title='Select folder containing recordings')
 
     # get list of all .mkv files in folder and subfolders
     mkv_list = []
@@ -359,7 +363,8 @@ def load_segment_rois(mkv_file):
 
 
 def load_timestamps(mkv_file):
-    """ Given an mkv file, load the timestamps in SECONDS from the corresponding h5 metadata file,"""
+    """ Given an mkv file, load the timestamps in SECONDS from the corresponding h5 metadata file.
+    Also gives the framerate (fps)"""
     
     metadata = mkv_file.replace('_raw_tiff.mkv', '_tif_metadata.h5')
     with h5py.File(metadata, 'r') as f:
@@ -369,7 +374,11 @@ def load_timestamps(mkv_file):
     timestamps[timestamps < 0] = timestamps[timestamps < 0] + 24*3600*1e6 # add a full day of microseconds if the values are negative
     timestamps = timestamps / 1e6 # convert to seconds
 
-    return timestamps
+    # calculate fps from timestamps 
+    diffs = np.diff(timestamps)
+    fps = 1 / np.median(diffs)
+
+    return timestamps, fps
 
 
 def load_min_max_proj(mkv_file):
