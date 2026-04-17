@@ -214,7 +214,6 @@ def plot_temporal_components(W, timestamps=None, order=None, color=None, norm=Fa
     else:
         # check that order is valid
         _check_order(order, W.shape[1])
-        order = [ord-1 for ord in order]
 
     if color is not None and len(color) == 1:
         color = color * len(order)
