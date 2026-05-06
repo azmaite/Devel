@@ -34,9 +34,11 @@ from __future__ import annotations
 import os
 import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from sklearn.decomposition import NMF
 import h5py
 import av
@@ -52,6 +54,10 @@ def mask_image(image: np.ndarray,
                mask: np.ndarray,
                bounding_box: np.ndarray | None = None) -> np.ndarray:
     """Extract 1D array of image values under the mask."""
+
+    # check that the dimensions of the mask and image are compatible
+    assert mask.shape == image.shape, f'Mask shape {mask.shape} does not match image shape {image.shape}'
+
     if bounding_box is not None:
         x, y, w, h = bounding_box
         mask = mask[y:y+h, x:x+w]
@@ -63,6 +69,10 @@ def unmask_image(values: np.ndarray,
                  bounding_box: np.ndarray | None = None) -> np.ndarray:
     """Reconstruct 2D image from masked values, zeros elsewhere
     and crop to bounding box (x, y, w, h) if provided."""
+
+    # check that the number of values matches the number of pixels in the mask
+    assert np.sum(mask) == len(values), f'Number of values {len(values)} does not match number of pixels in mask {np.sum(mask)}'
+
     result = np.zeros(mask.shape)
     result[mask.astype(bool)] = values
 
@@ -116,7 +126,7 @@ def nmf_get_temporal(frames: np.ndarray,
                      **nmf_kwargs) -> np.ndarray:
     """Given spatial components H, solve for temporal components W using frames."""
 
-    kwargs = dict(n_components=H.shape[0], max_iter=4000, init='custom')
+    kwargs: dict[str, Any] = dict(n_components=H.shape[0], max_iter=4000, init='custom')
     kwargs.update(nmf_kwargs)
     kwargs['init'] = 'custom'  # always use custom init for this step regardless of user input
 
@@ -159,7 +169,7 @@ def fit_nmf(frames: np.ndarray,
     if selected_idx is None:
         selected_idx = np.arange(frames.shape[0])
 
-    kwargs = dict(n_components=n_components, max_iter=4000, init='random', random_state=0)
+    kwargs: dict[str, Any] = dict(n_components=n_components, max_iter=4000, init='random', random_state=0)
     kwargs.update(nmf_kwargs)
     model = NMF(**kwargs)
     W_orig = model.fit_transform(frames[selected_idx])
@@ -182,7 +192,7 @@ def nmf_variance_explained(V: np.ndarray,
     ss_res = np.linalg.norm(V - V_hat, 'fro')**2
     ss_tot = np.linalg.norm(V - V.mean(), 'fro')**2
 
-    return 1 - ss_res / ss_tot
+    return float(1 - ss_res / ss_tot)
 
 
 def select_most_different_frames(frames_flat_dif_norm: np.ndarray,
@@ -217,13 +227,14 @@ def _check_order(order: np.ndarray | list,
 
     Parameters
     ----------
-    order : np.ndarray or list
+    order : np.ndarray or list[float]
         Ordering array. May contain NaN values for blank slots. Non-NaN values
         must be unique integers in [0, n_components).
     n_components : int
         Expected number of non-NaN entries in `order`.
     """
 
+    assert isinstance(order, (list, np.ndarray)), 'Order must be a list or numpy array'
     assert len(order) >= n_components, 'Order must be at least as long as the number of components'
     assert np.sum(~np.isnan(order)) == n_components, 'Order must have as many non-nan elements as components'
 
@@ -237,7 +248,7 @@ def plot_temporal_components(W: np.ndarray,
                               order: np.ndarray | list | None = None,
                               color: list | np.ndarray | None = None,
                               norm: bool = False,
-                              fig: plt.Figure | None = None,
+                              fig: Figure | None = None,
                               xlims: tuple | None = None) -> None:
     """Plot the temporal components as line plots, with options for ordering, coloring, and normalization."""
 
@@ -289,7 +300,8 @@ def plot_spatial_components(H: np.ndarray,
                              roi: np.ndarray | None = None,
                              order: np.ndarray | list | None = None,
                              cols: int = 6) -> None:
-    """Plot the spatial components as images, with the roi contour overlaid (if present)."""
+    """Plot the spatial components as images, with the roi contour overlaid (if present).
+    If the spatial component (and mask) are 3d, they will be averaged across the z dimension before plotting."""
 
     if order is None:
         order = np.arange(H.shape[0])
@@ -306,6 +318,11 @@ def plot_spatial_components(H: np.ndarray,
             continue
 
         img = unmask_image(H[int(comp_i)], mask, bounding_box)
+
+        # If the spatial component are 3D, average across z dimension
+        if img.ndim == 3:
+            img = img.mean(axis=0)
+
         axes[n].imshow(img, cmap='viridis')
         if roi is not None:
             roi_cropped = roi - bounding_box[:2]
@@ -313,7 +330,7 @@ def plot_spatial_components(H: np.ndarray,
         axes[n].axis('off')
         axes[n].set_title(f'Component {int(comp_i)}', fontsize=8)
 
-    for j in range(n + 1, len(axes)):
+    for j in range(len(order), len(axes)):
         axes[j].axis('off')
     plt.show()
 
@@ -376,7 +393,7 @@ def get_hAPF(mkv_file: str) -> int:
     return hoursAPF
 
 
-def load_segment_rois(mkv_file: str | list) -> tuple[dict, dict, dict, list[str]]:
+def load_segment_rois(mkv_file: str | list[str]) -> tuple[dict, dict, dict, list[str]]:
     """
     Given an mkv file, load the segment rois, masks, and bounding boxes
     from the corresponding h5 file.
@@ -390,12 +407,12 @@ def load_segment_rois(mkv_file: str | list) -> tuple[dict, dict, dict, list[str]
     bounding_boxes: dict = {}
     h5_file = Path(mkv_file).parent.parent / 'segment_rois.h5'
     with h5py.File(h5_file, 'r') as f:
-        segment_names = f['segment_names'][:]
+        segment_names : list = f['segment_names'][:]  # type: ignore[index]
         segment_names = [name.decode('utf-8') for name in segment_names]
         for segment_name in segment_names:
-            rois[segment_name] = f[f'{segment_name}_roi'][:]
-            masks[segment_name] = f[f'{segment_name}_mask'][:]
-            bounding_boxes[segment_name] = f[f'{segment_name}_bounding_box'][:]
+            rois[segment_name] = f[f'{segment_name}_roi'][:]  # type: ignore[index]
+            masks[segment_name] = f[f'{segment_name}_mask'][:]  # type: ignore[index]
+            bounding_boxes[segment_name] = f[f'{segment_name}_bounding_box'][:]  # type: ignore[index]
 
     return rois, masks, bounding_boxes, segment_names
 
@@ -408,7 +425,7 @@ def load_timestamps(mkv_file: str) -> tuple[np.ndarray, float]:
 
     metadata = Path(mkv_file.replace('_raw_tiff.mkv', '_tif_metadata.h5'))
     with h5py.File(metadata, 'r') as f:
-        timestamps = f['timestamps'][:]  # in MICROSECONDS
+        timestamps : np.ndarray = f['timestamps'][:]  # type: ignore[index]  # in MICROSECONDS
     timestamps = timestamps.astype(np.int64)
     timestamps = timestamps - timestamps[0]
     timestamps[timestamps < 0] = timestamps[timestamps < 0] + 24 * 3600 * 1e6  # wrap midnight overflow
@@ -416,7 +433,7 @@ def load_timestamps(mkv_file: str) -> tuple[np.ndarray, float]:
 
     fps = 1 / np.median(np.diff(timestamps))
 
-    return timestamps, fps
+    return timestamps, float(fps)
 
 
 def load_min_max_proj(mkv_file: str) -> tuple[np.ndarray, np.ndarray]:
@@ -427,8 +444,8 @@ def load_min_max_proj(mkv_file: str) -> tuple[np.ndarray, np.ndarray]:
 
     h5_path = Path(mkv_file).parent / 'max_min_proj.h5'
     with h5py.File(h5_path, 'r') as f:
-        min_proj = f['min_proj'][:]
-        max_proj = f['max_proj'][:]
+        min_proj : np.ndarray = f['min_proj'][:]  # type: ignore[index]
+        max_proj : np.ndarray = f['max_proj'][:]  # type: ignore[index]
 
     return min_proj, max_proj
 
@@ -441,7 +458,7 @@ def load_median_frame(mkv_file: str) -> np.ndarray:
 
     h5_path = Path(mkv_file).parent / 'max_min_proj.h5'
     with h5py.File(h5_path, 'r') as f:
-        median_frame = f['median'][:]
+        median_frame : np.ndarray = f['median'][:]  # type: ignore[index]
 
     return median_frame
 
@@ -469,10 +486,11 @@ def load_mkv_roi(mkv_file: str,
 
     all_frames_flat: dict = {}
     median_flat: dict = {}
+    all_frames_square: dict = {}
+
     if bounding_boxes is not None:
         for roi_name in roi_names:
             assert roi_name in bounding_boxes, f'Bounding box for {roi_name} not found in bounding_boxes'
-        all_frames_square: dict = {}
 
     container = av.open(mkv_file)
 
