@@ -36,11 +36,13 @@ from __future__ import annotations
 import os
 import datetime
 from pathlib import Path
+import signal
 from typing import Any
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from scipy import ndimage
 from sklearn.decomposition import NMF
 import h5py
 import av
@@ -131,11 +133,15 @@ def intersect_masks(mask1: np.ndarray,
 # W=temporal components, H=spatial components
 
 def diff_norm_frames(frames: np.ndarray,
-                     background_img: np.ndarray | None = None) -> np.ndarray:
+                     background_img: np.ndarray | None = None,
+                     rolling_win: None | int = 8) -> np.ndarray:
     """
     For each frame, get the difference from the background image (median frame or
     min_proj) across all frames, and normalize the difference from 0 to 1 (ignoring
-    nans). This can help to enhance the signal for NMF. Frames can be flat or not.
+    nans). If rolling_win is provided, use a rolling window to compute the background
+    image and subtract it to remove bleaching and other slow changes. 
+    All This can help to enhance the signal for NMF or other methods. 
+    Frames can be flat or not.
     """
 
     if background_img is None:
@@ -144,6 +150,10 @@ def diff_norm_frames(frames: np.ndarray,
 
     frames_dif = frames - background_img
     frames_dif[frames_dif < 0] = 0
+
+    if rolling_win is not None:
+        rolling_min = ndimage.minimum_filter1d(signal, size=rolling_win, axis=0, mode='nearest')
+        frames_dif = frames_dif - rolling_min
 
     frames_dif_norm = (frames_dif - np.nanmin(frames_dif)) / (np.nanmax(frames_dif) - np.nanmin(frames_dif))
 
@@ -190,7 +200,8 @@ def fit_nmf(frames: np.ndarray,
     Returns
     -------
     tuple[np.ndarray, np.ndarray, np.ndarray]
-        W (temporal components for all frames), H (spatial components),
+        W (temporal components for all frames), 
+        H (spatial components),
         W_orig (temporal components for selected frames only).
     """
 
@@ -228,7 +239,7 @@ def nmf_variance_explained(V: np.ndarray,
 
 def select_most_different_frames(frames_flat_dif_norm: np.ndarray,
                                   n_select: int = 200) -> list[int]:
-    """Given a set of frames, select the `n_select` most different frames to use for NMF."""
+    """Given a set of frames, select the `n_select` most different frames."""
 
     scores = frames_flat_dif_norm.mean(axis=1)
     selected_idx = [scores.argmax()]
@@ -236,7 +247,7 @@ def select_most_different_frames(frames_flat_dif_norm: np.ndarray,
     dists = np.linalg.norm(frames_flat_dif_norm - frames_flat_dif_norm[selected_idx[0]], axis=1)
     dists[selected_idx] = -np.inf
 
-    print('Selecting most different frames for NMF...')
+    print('Selecting most different frames...')
     for _ in tqdm.tqdm(range(n_select - 1)):
         new_selected_idx = np.argmax(dists)
         selected_idx.append(new_selected_idx)
