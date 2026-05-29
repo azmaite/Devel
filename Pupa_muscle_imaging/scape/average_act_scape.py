@@ -35,6 +35,7 @@ import shutil
 import argparse
 import time
 
+import h5py
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -119,8 +120,11 @@ def average_act_scape(folder_path: str,
     Compute and plot per-volume mean and max fluorescence from SCAPE data.
 
     Loads the recording in batches to keep memory usage bounded, deskews
-    each batch, and saves mean- and max-activity-over-time plots as PNGs
-    inside a Figures/ subfolder.
+    each batch, and computes:
+      - per-volume mean and max fluorescence (saved as PNGs in Figures/)
+      - a per-voxel std image across all volumes (saved as Figures/std_image.png
+        and as mean_std_stats.h5 with mean, mean_sq, and frame_count so the
+        std can be updated later with additional data)
 
     Parameters
     ----------
@@ -141,6 +145,9 @@ def average_act_scape(folder_path: str,
 
     all_means = []
     all_maxes = []
+    sum_x: np.ndarray | None = None
+    sum_x2: np.ndarray | None = None
+    frame_count = 0
 
     n_batches = int(np.ceil(num_volumes / batch_size))
     t0 = time.time()
@@ -162,16 +169,29 @@ def average_act_scape(folder_path: str,
         deskewed_batch = scapeio.operations.deskew_scan(
             dat_folder, images=video_batch)
         deskewed_batch = deskewed_batch.astype(np.float32)
+        del video_batch
 
         # deskewed_batch shape: (n_vols_in_batch, Z, X, Y)
         spatial_axes = tuple(range(1, deskewed_batch.ndim))
         all_means.append(deskewed_batch.mean(axis=spatial_axes))
         all_maxes.append(deskewed_batch.max(axis=spatial_axes))
 
+        if sum_x is None:
+            sum_x = np.sum(deskewed_batch, axis=0)
+            sum_x2 = np.sum(deskewed_batch ** 2, axis=0)
+        else:
+            sum_x += np.sum(deskewed_batch, axis=0)
+            sum_x2 += np.sum(deskewed_batch ** 2, axis=0)
+        frame_count += deskewed_batch.shape[0]
+        del deskewed_batch
+
     means = np.concatenate(all_means)  # shape (num_volumes,)
     maxes = np.concatenate(all_maxes)
 
-    times = np.arange(num_volumes) / scan_rate  # seconds
+    mean_image = sum_x / frame_count
+    mean_sq_image = sum_x2 / frame_count
+    variance = np.maximum(0, mean_sq_image - np.square(mean_image))
+    std_image = np.sqrt(variance)
 
     figures_dir = os.path.join(folder_path, 'Figures')
     os.makedirs(figures_dir, exist_ok=True)
@@ -191,6 +211,25 @@ def average_act_scape(folder_path: str,
         fig.savefig(out_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f'Saved {out_path}')
+
+    # std image: max projection across Z for a 2D summary
+    std_proj = std_image.max(axis=0)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(std_proj.T, cmap='gray', aspect='auto')
+    ax.set_title('Std image (Z max projection)')
+    ax.axis('off')
+    fig.tight_layout()
+    std_png_path = os.path.join(figures_dir, 'std_image.png')
+    fig.savefig(std_png_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Saved {std_png_path}')
+
+    stats_path = os.path.join(folder_path, 'mean_std_stats.h5')
+    with h5py.File(stats_path, 'w') as f:
+        f.create_dataset('mean', data=mean_image, compression='gzip')
+        f.create_dataset('mean_sq', data=mean_sq_image, compression='gzip')
+        f.attrs['frame_count'] = frame_count
+    print(f'Saved {stats_path}')
 
 
 def main() -> None:
