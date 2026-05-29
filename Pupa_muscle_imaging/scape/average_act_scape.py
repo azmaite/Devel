@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-Compute per-volume mean and max fluorescence activity from raw SCAPE data.
+Compute per-volume mean/max fluorescence and a per-voxel std image from SCAPE data.
 
 Pipeline:
   1. Optionally reorganize .dat files into a RawData subfolder.
   2. Load the recording in batches of 100 volumes.
   3. Deskew each batch and convert to float32.
-  4. Compute per-volume mean and max fluorescence.
-  5. Plot mean and max activity vs volume number and save PNGs to Figures/.
+  4. Compute per-volume mean and max fluorescence (time series).
+  5. Accumulate per-voxel sum and sum-of-squares for the std image.
+  6. Plot mean and max activity vs volume number and save PNGs to Figures/.
+  7. Save a Z-max-projected std image to Figures/std_image.png.
+  8. Save mean, mean_sq, and frame_count to mean_std_stats.h5 so the std
+     image can be updated later with additional data.
 
 Usage:
   python average_act_scape.py /path/to/recording/folder [options]
