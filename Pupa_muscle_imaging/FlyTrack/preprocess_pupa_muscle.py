@@ -199,8 +199,7 @@ def _preprocess(mkv_file: str) -> None:
     mp4.release()
     container.close()
 
-    # get median frame - use np.partition because it's faster than np.median for large arrays (does not sort the whole array, just finds the median value)
-    median_frame = np.partition(frames_array, frames_array.shape[0] // 2, axis=0)[frames_array.shape[0] // 2]
+    print('Finished creating video')
 
     # get std image
     std_frame = np.std(frames_array, axis=0)
@@ -227,13 +226,16 @@ def _preprocess(mkv_file: str) -> None:
     clip = 600
     min_proj_clip = np.clip(min_proj, 0, clip) / clip * 255
     min_proj_clip = min_proj_clip.astype(np.uint8)
-    median_clip = np.clip(median_frame, 0, clip) / clip * 255
-    median_clip = median_clip.astype(np.uint8)
-
     cv2.imwrite(os.path.join(dir, MAX_SAVE_NAME), max_proj_clip)
     cv2.imwrite(os.path.join(dir, MIN_SAVE_NAME), min_proj_clip)
-    cv2.imwrite(os.path.join(dir, MEDIAN_SAVE_NAME), median_clip)
 
+    # get median frame - use np.partition because it's faster than np.median for large arrays (does not sort the whole array, just finds the median value)
+    print('Calculating median frame...')
+    median_frame = np.partition(frames_array, frames_array.shape[0] // 2, axis=0)[frames_array.shape[0] // 2]
+    median_clip = np.clip(median_frame, 0, clip) / clip * 255
+    median_clip = median_clip.astype(np.uint8)
+    cv2.imwrite(os.path.join(dir, MEDIAN_SAVE_NAME), median_clip)
+    print('Finished calculating median frame. Saving all outputs in h5 file...')
 
     # save also as h5 file (without clipping, for analysis), as well as the std image
     h5_path = os.path.join(dir, H5_SAVE_NAME)
