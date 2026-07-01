@@ -5,6 +5,21 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "av>=15.0.0,<16.0.0",
+    "h5py>=3.16.0",
     "matplotlib>=3.11.0",
-    "parallel-video-io>=0.1.9",
+    "numpy>=2.4.6",
+    "opencv-python-headless>=4.13.0.92",
+    "parallel-video-io==0.1.10a0",
+    "pathlib>=1.0.1",
+    "scikit-image>=0.26.0",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.17.1",
+    "tifffile>=2026.3.3",
+    "tqdm>=4.68.3",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
 ]
