@@ -291,6 +291,7 @@ def plot_temporal_components(W: np.ndarray,
                               color: list | np.ndarray | None = None,
                               norm: bool = False,
                               fig: Figure | None = None,
+                              legend: bool = True,
                               xlims: tuple | None = None) -> None:
     """Plot the temporal components as line plots, with options for ordering, coloring, and normalization."""
 
@@ -325,7 +326,8 @@ def plot_temporal_components(W: np.ndarray,
     plt.xlabel('Time (s)')
     plt.ylabel('Component Activation')
     plt.title('Temporal Components from NMF')
-    plt.legend()
+    if legend:
+        plt.legend()
 
     if xlims is not None:
         plt.xlim(xlims)
@@ -436,10 +438,64 @@ def get_hAPF(mkv_file: str) -> int:
     return hoursAPF
 
 
+def _find_segment_rois_h5(path: str) -> Path:
+    """
+    Locate the `segment_rois.h5` written by `FlyTrack.select_manual_roi`.
+
+    `select_manual_roi` saves `segment_rois.h5` in the folder that holds the
+    projection-images h5 it drew on: the recording folder (per-recording ROIs) or
+    the analysis folder (ROIs drawn on the grouped projection). This resolves that
+    file from either:
+
+    - a folder path that directly contains `segment_rois.h5` (e.g. an analysis
+      folder for grouped ROIs), or
+    - an .mkv file path, in which case its own folder (the current, per-recording
+      location) is checked first, then the folder above it (the legacy location
+      used by the old `select_manual_roi`).
+
+    Parameters
+    ----------
+    path : str
+        A folder containing `segment_rois.h5`, or an .mkv file next to (or one
+        level below) it.
+
+    Returns
+    -------
+    Path
+        Path to the located `segment_rois.h5`.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no `segment_rois.h5` is found in the searched locations.
+    """
+
+    p = Path(path)
+    if p.is_dir():
+        candidates = [p / 'segment_rois.h5']
+    else:
+        # .mkv file: its own folder (current location), then one above (legacy)
+        candidates = [p.parent / 'segment_rois.h5',
+                      p.parent.parent / 'segment_rois.h5']
+
+    h5_file = next((c for c in candidates if c.exists()), None)
+    if h5_file is None:
+        searched = ', '.join(str(c) for c in candidates)
+        raise FileNotFoundError(f'No segment_rois.h5 found. Searched: {searched}')
+    return h5_file
+
+
 def load_segment_rois(mkv_file: str | list[str]) -> tuple[dict, dict, dict, list[str]]:
     """
-    Given an mkv file, load the segment rois, masks, and bounding boxes
-    from the corresponding h5 file.
+    Load the segment rois, masks, and bounding boxes from `segment_rois.h5`.
+
+    `mkv_file` may be an .mkv file path (the h5 is looked up next to it, then one
+    folder above, see `_find_segment_rois_h5()`) or a folder that directly
+    contains `segment_rois.h5` (e.g. an analysis folder for grouped ROIs). A list
+    is accepted, in which case its first entry is used.
+
+    For 3D (SCAPE) ROIs the returned `rois` hold the X-Y polygon (the `{name}_roi`
+    alias saved alongside the 3D mask).
     """
 
     if isinstance(mkv_file, list):
@@ -448,7 +504,7 @@ def load_segment_rois(mkv_file: str | list[str]) -> tuple[dict, dict, dict, list
     rois: dict = {}
     masks: dict = {}
     bounding_boxes: dict = {}
-    h5_file = Path(mkv_file).parent.parent / 'segment_rois.h5'
+    h5_file = _find_segment_rois_h5(mkv_file)
     with h5py.File(h5_file, 'r') as f:
         segment_names : list = f['segment_names'][:]  # type: ignore[index]
         segment_names = [name.decode('utf-8') for name in segment_names]
