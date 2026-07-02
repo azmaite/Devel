@@ -5,7 +5,7 @@ Shared helpers for the FlyTrack .mkv preprocessing and motion-correction scripts
 Holds the constants, the single-video decode/projection routine, the
 per-recording processing (decode a video -> save ``projection_images.h5``
 (including a whole-video ``std`` image computed from the cumulative mean/mean_sq),
-``metadata.txt``, ``activity.png``, ``median.png``, ``max_activity.png`` and
+``metadata.txt``, ``activity.png``, ``median.png``, ``max_proj.png`` and
 ``std.png`` preview images, a half-resolution/compressed ``summary_video.mp4``
 preview, and, when motion-correcting, ``drift.png`` and a
 ``summary_video_motioncorrected.mp4``), and the interactive terminal selection
@@ -60,12 +60,11 @@ ACT_SAVE_NAME = 'activity.png'               # per-recording mean fluorescence p
 DRIFT_SAVE_NAME = 'drift.png'                # per-recording estimated drift plot
 MEDIAN_SAVE_NAME = 'median.png'              # per-recording median image
 STD_SAVE_NAME = 'std.png'                    # per-recording std image
-MAX_ACTIVITY_SAVE_NAME = 'max_activity.png'  # per-recording max_proj - median
+MAX_PROJ_SAVE_NAME = 'max_proj.png'          # per-recording max projection
 SUMMARY_NAME = 'summary_video.mp4'           # per-recording downsampled preview
 SUMMARY_MC_NAME = 'summary_video_motioncorrected.mp4'  # per-recording, corrected
 MKV_PATHS_NAME = 'mkv_paths.json'            # in the analysis folder
 GROUPED_H5_NAME = 'projection_images_grouped.h5'  # in the analysis folder
-ACTIVITY_NAME = 'activity.jpg'               # in the analysis folder
 
 # datasets required in projection_images.h5 for a recording to count as done.
 # `std` is included so recordings processed before it was added (which cannot be
@@ -656,8 +655,8 @@ def _write_pngs(path: str) -> None:
 
     Reads the `median`, `max_proj`, and `std` datasets from a projection-images
     h5 and writes three auto-contrasted 8-bit PNGs in the same folder:
-    `median.png` (the median image), `max_activity.png` (max projection minus
-    median, clipped at 0), and `std.png` (the std image). The `std` dataset must
+    `median.png` (the median image), `max_proj.png` (the max projection), and
+    `std.png` (the std image). The `std` dataset must
     already exist (it is computed during preprocessing); it is not rebuilt here,
     so re-run preprocessing if it is missing.
 
@@ -701,11 +700,9 @@ def _write_pngs(path: str) -> None:
     # median image, auto-contrasted min..99.8th percentile
     cv2.imwrite(os.path.join(dir, MEDIAN_SAVE_NAME), _autocontrast_8bit(median))
 
-    # max activity: max projection minus median (clipped at 0), auto-contrasted
-    max_activity = np.clip(max_proj.astype(np.float64) - median.astype(np.float64),
-                           0, None)
-    cv2.imwrite(os.path.join(dir, MAX_ACTIVITY_SAVE_NAME),
-                _autocontrast_8bit(max_activity))
+    # max projection, auto-contrasted min..99.8th percentile
+    cv2.imwrite(os.path.join(dir, MAX_PROJ_SAVE_NAME),
+                _autocontrast_8bit(max_proj))
 
     # std image, auto-contrasted min..99.8th percentile
     cv2.imwrite(os.path.join(dir, STD_SAVE_NAME), _autocontrast_8bit(std))
@@ -722,7 +719,7 @@ def _process_mkv(mkv_file: str,
     plus the `activity.png` mean-fluorescence plot. The whole-video std image is
     rebuilt from the cumulative mean/mean_sq and stored in the h5 as `std`, and
     two auto-contrasted preview PNGs are written next to the video: `median.png`
-    (the median image) and `max_activity.png` (max projection minus median).
+    (the median image) and `max_proj.png` (the max projection).
 
     If `motion_correct` is True, rigid-translation drift is removed first: the
     video is decoded once to build a (drift-blurred) median, that median is
@@ -789,7 +786,7 @@ def _process_mkv(mkv_file: str,
         if proj['shifts'] is not None:
             f.create_dataset('shifts', data=proj['shifts'])
 
-    # save the median / max-activity / std preview PNGs
+    # save the median / max projection / std preview PNGs
     _write_pngs(h5_path)
 
     # plot the mean fluorescence over time and save as a png

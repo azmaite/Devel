@@ -32,8 +32,8 @@ Workflow
    These are saved to ``projection_images.h5`` next to the video, along with the
    whole-video ``std`` image computed from the cumulative mean/mean_sq. The mean
    fluorescence is plotted over time and saved as ``activity.png``, the median,
-   (max projection - median), and std are saved as the auto-contrasted
-   ``median.png``, ``max_activity.png`` and ``std.png`` preview images, and a
+   max projection, and std are saved as the auto-contrasted
+   ``median.png``, ``max_proj.png`` and ``std.png`` preview images, and a
    small half-resolution (2x2-averaged), compressed ``summary_video.mp4`` preview
    is written for quick visual inspection. Video size (x, y), length (n), and fps
    are saved to ``metadata.txt`` and added to ``mkv_paths.json`` as ``size``,
@@ -49,10 +49,8 @@ Workflow
        - ``max_proj``    : pixel-wise maximum of every recording's max projection
        - ``std``         : std image rebuilt from the combined mean/mean_sq/count
    These are saved to ``projection_images_grouped.h5`` in the analysis folder,
-   and its ``median.png``, ``max_activity.png`` and ``std.png`` preview images
+   and its ``median.png``, ``max_proj.png`` and ``std.png`` preview images
    are written next to it.
-6. Save ``activity.jpg`` (max_proj - median) in the analysis folder,
-   auto-contrasted between its minimum and 95th percentile.
 
 Example usages from the terminal:
         python3 preprocess_flytrack.py
@@ -66,7 +64,6 @@ import datetime
 import argparse
 
 import numpy as np
-import cv2
 import h5py
 import tqdm
 from scipy import ndimage
@@ -80,10 +77,9 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from flytrack_core import (MAIN_PATH, MKV_PATHS_NAME, PROJ_H5_NAME,
-                           GROUPED_H5_NAME, ACTIVITY_NAME, _highpass,
+                           GROUPED_H5_NAME, _highpass,
                            _process_mkv, _outputs_exist, _read_existing_metadata,
-                           _select_mkv_paths, _write_pngs,
-                           _autocontrast_8bit)
+                           _select_mkv_paths, _write_pngs)
 
 
 def preprocess_flytrack(input_folder: str = '') -> None:
@@ -248,9 +244,8 @@ def _build_grouped(entries: list[dict],
     computes the pixel-wise median of all median images (`median`), the
     pixel-wise maximum of all max projections (`max_proj`), and the std image
     rebuilt from the combined cumulative mean, mean of squares, and frame counts.
-    These are written to `projection_images_grouped.h5`, its preview PNGs are
-    saved with `_write_pngs()`, and an auto-contrasted `max_proj - median`
-    activity image is saved as a jpg.
+    These are written to `projection_images_grouped.h5` and its preview PNGs are
+    saved with `_write_pngs()`.
 
     Parameters
     ----------
@@ -306,16 +301,8 @@ def _build_grouped(entries: list[dict],
         f.create_dataset('std', data=std)
     print(f'Saved grouped projections to {grouped_path}')
 
-    # save the grouped median / max-activity / std preview PNGs
+    # save the grouped median / max projection / std preview PNGs
     _write_pngs(grouped_path)
-
-    # activity image: max_proj - median, auto-contrasted min..95th percentile
-    activity = np.clip(max_proj.astype(np.float64) - median.astype(np.float64),
-                       0, None)
-    activity_8bit = _autocontrast_8bit(activity)
-    activity_path = os.path.join(analysis_folder, ACTIVITY_NAME)
-    cv2.imwrite(activity_path, activity_8bit)
-    print(f'Saved activity image to {activity_path}')
 
 
 if __name__ == '__main__':
