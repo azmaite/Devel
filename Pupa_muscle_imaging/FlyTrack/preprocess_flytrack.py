@@ -82,7 +82,7 @@ from flytrack_core import (MAIN_PATH, MKV_PATHS_NAME, PROJ_H5_NAME,
                            _select_mkv_paths, _write_pngs)
 
 
-def preprocess_flytrack(input_folder: str = '') -> None:
+def preprocess_flytrack(input_folder: str = '') -> str:
     """
     Run the full FlyTrack preprocessing workflow (see module docstring).
 
@@ -91,6 +91,11 @@ def preprocess_flytrack(input_folder: str = '') -> None:
     input_folder : str, optional
         Path to the input folder. If empty, a file dialog is opened for the
         user to select it interactively.
+
+    Returns
+    -------
+    analysis_folder : str
+        Path to the analysis folder (``YYYY-MM-DD_analysis``)
     """
 
     # ask for the input folder if not provided
@@ -165,6 +170,8 @@ def preprocess_flytrack(input_folder: str = '') -> None:
     # align the recordings to each other, then build the grouped projections
     _align_group(entries, analysis_folder)
     _build_grouped(entries, analysis_folder)
+
+    return analysis_folder
 
 
 def _align_group(entries: list[dict],
