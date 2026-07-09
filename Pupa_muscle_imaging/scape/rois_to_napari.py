@@ -1,7 +1,10 @@
 """ Convert SCAPE ROIs to NRRD format to load in napari.
 For the 3d rois to match scape video data, it must be deskewed before loading into napari. 
 Run scape_convert . -1 --batches 5 --deskew using conda environment scapeio from
-the raw_data_path to get the deskewed data that can be opened in napari."""
+the raw_data_path to get the deskewed data that can be opened in napari.
+Then visualize the video using scape_view sample1_run12_deskewed_batch2of5.nrrd -1 --deskewed
+(replace the nnrd file with the one you want to visualize).
+"""
 
 
 
