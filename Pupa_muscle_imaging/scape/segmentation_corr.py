@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Correlation-based seeded segmentation of 3D calcium imaging data.
 
@@ -13,20 +12,28 @@ Pipeline:
 Usage:
   python segmentation_corr.py /path/to/processed_active_pixels.h5 [options]
 
+  Or import and call directly:
+  from segmentation_corr import segmentation_corr
+  results = segmentation_corr(h5_path, ...)
+
 Parameters:
     h5_path : str
         Path to processed_active_pixels.h5 file containing selected active pixels and mask.
         Omit to pick a folder via file dialog.
-    --rolling_window : int, default=8
+    --rolling-window : int, default=8
         Rolling window size (in frames) for bleaching correction.
-    --active_percentile : float, default=50.0
+    --active-percentile : float, default=50.0
         Percentile threshold for selecting active frames based on total activity.
-    --corr-seed : float, default=0.3
+    --corr-seed : float, default=0.5
         Minimum local correlation for seed selection (0 to 1).
-    --min_distance : float, default=5.0
+    --min-distance : float, default=15.0
         Minimum physical separation between seeds in microns.
         Converted to a per-axis voxel count using the voxel size from scapeio,
         so it correctly handles anisotropic voxels.
+    --corr-grow : float, default=0.75
+        Minimum correlation with seed trace to join a region.
+    --min-size : int, default=20
+        Discard regions smaller than this many voxels.
     --out-dir : str, default=None
         Output directory for results. If not provided, saves to same folder as h5_path.
 """
@@ -41,13 +48,12 @@ import tqdm
 from scipy import ndimage
 from skimage.feature import peak_local_max
 import matplotlib
-matplotlib.use('Agg')
+#matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from tifffile import imwrite
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import utils
-
+# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# import utils
 
 # ---------------------------------------------------------------------------
 # Data loading and preprocessing
@@ -579,8 +585,7 @@ def plot_results(corr_image: np.ndarray,
 
 def _pick_h5_via_dialog() -> str:
     """
-    Open a folder-chooser dialog and return the path to
-    processed_active_pixels.h5 inside the selected folder.
+    Open a folder-chooser dialog and return the path to an h5 file.
     Exits with an error message if the file is not found.
     """
     import tkinter as tk
@@ -588,21 +593,131 @@ def _pick_h5_via_dialog() -> str:
 
     root = tk.Tk()
     root.withdraw()
-    folder = filedialog.askdirectory(
-        title='Select recording folder containing processed_active_pixels.h5',
+    file = filedialog.askopenfilename(
+        title='Select processed_active_pixels.h5 file',
+        filetypes=[('H5 files', '*.h5')],
         initialdir='/mnt/labserver/data/MA/')
     root.destroy()
 
-    if not folder:
-        print('No folder selected. Exiting.')
+    if not file:
+        print('No file selected. Exiting.')
         sys.exit(0)
 
-    h5_path = os.path.join(folder, 'processed_active_pixels_noResReduction.h5')
+    h5_path = file
     if not os.path.isfile(h5_path):
-        print(f'processed_active_pixels_noResReduction.h5 not found in {folder}')
+        print(f'File not found: {h5_path}')
         sys.exit(1)
 
     return h5_path
+
+
+def segmentation_corr(h5_path: str,
+                       rolling_window: int = 8,
+                       active_percentile: float = 50.0,
+                       corr_seed: float = 0.5,
+                       min_distance: float = 15.0,
+                       corr_grow: float = 0.75,
+                       min_size: int = 20,
+                       out_dir: str | None = None) -> dict:
+    """
+    Run the full correlation-based seeded segmentation pipeline.
+
+    Parameters
+    ----------
+    h5_path : str
+        Path to processed_active_pixels.h5.
+    rolling_window : int
+        Rolling-minimum window for bleaching correction (frames).
+    active_percentile : float
+        Use frames above this activity percentile for correlation computation.
+    corr_seed : float
+        Min local correlation to be a seed candidate (0 to 1).
+    min_distance : float
+        Min physical separation between seeds in microns.
+    corr_grow : float
+        Min correlation with seed trace to join a region.
+    min_size : int
+        Discard regions smaller than this many voxels.
+    out_dir : str or None
+        Output directory. Defaults to a `corr_output/` subfolder next to h5_path.
+
+    Returns
+    -------
+    dict with keys: labels, labels_3d, temporal_traces, corr_image, seeds,
+                    active_mask, voxel_size, aspect_ratio
+    """
+    out_dir = os.path.join(
+        out_dir or os.path.dirname(os.path.abspath(h5_path)),
+        'corr_output')
+
+    axes = {'z': 0, 'x': 1, 'y': 2}
+    try:
+        import scapeio
+        rec_path = os.path.dirname(os.path.abspath(h5_path))
+        voxel_size = np.array(scapeio.get_voxel_size(rec_path, '50 mm Navitar',
+                                                     deskewed=True))
+        aspect_ratio = voxel_size[axes['x']] / voxel_size[axes['y']]
+        print(f'Voxel size: {voxel_size[0]:.3f} x {voxel_size[1]:.3f} x '
+              f'{voxel_size[2]:.3f} µm  (aspect ratio: {aspect_ratio:.4f})')
+    except Exception as e:
+        print(f'Could not get voxel size from scapeio ({e}), '
+              f'assuming isotropic voxels — min-distance treated as voxels')
+        voxel_size = np.ones(3)
+        aspect_ratio = 1.0
+
+    # 1. Load
+    active_video_flat, active_mask, std_image = load_data(h5_path)
+
+    # 2. Preprocess: active frames only for correlation computation
+    signal_active, _ = preprocess(active_video_flat,
+                                   rolling_window=rolling_window,
+                                   active_frame_percentile=active_percentile)
+    traces_norm = normalize_traces(signal_active)
+
+    # 3. Local correlation image
+    corr_image = compute_local_correlation(traces_norm, active_mask)
+
+    # 4. Find seeds (sorted by descending correlation)
+    seeds, seed_corr = find_seeds(corr_image, active_mask,
+                                   corr_threshold=corr_seed,
+                                   min_distance_um=min_distance,
+                                   voxel_size=voxel_size)
+
+    # 5. Region growing
+    Z, X, Y = active_mask.shape
+    N = int(active_mask.sum())
+    idx_vol = np.full((Z, X, Y), -1, dtype=np.int32)
+    idx_vol[active_mask] = np.arange(N, dtype=np.int32)
+
+    labels, labels_3d = grow_regions(seeds, traces_norm, active_mask, idx_vol,
+                                      corr_threshold=corr_grow,
+                                      min_region_size=min_size)
+
+    # 6. Temporal traces on full preprocessed signal (all frames)
+    signal_full = preprocess_full(active_video_flat, rolling_window=rolling_window)
+    temporal_traces = compute_temporal_traces(labels, signal_full)
+
+    # 7. Save
+    params = dict(rolling_window=rolling_window,
+                  active_percentile=active_percentile,
+                  corr_seed=corr_seed,
+                  min_distance_um=min_distance,
+                  voxel_size=list(voxel_size),
+                  corr_grow=corr_grow,
+                  min_size=min_size)
+    save_results(os.path.join(out_dir, 'segmentation_corr.h5'),
+                 labels, labels_3d, temporal_traces, corr_image,
+                 seeds, active_mask, params)
+
+    # 8. Visualize
+    plot_results(corr_image, labels_3d, seeds, temporal_traces, active_mask,
+                 aspect_ratio=aspect_ratio, voxel_size=voxel_size,
+                 out_dir=out_dir)
+
+    return dict(labels=labels, labels_3d=labels_3d,
+                temporal_traces=temporal_traces, corr_image=corr_image,
+                seeds=seeds, active_mask=active_mask,
+                voxel_size=voxel_size, aspect_ratio=aspect_ratio)
 
 
 def main() -> None:
@@ -631,79 +746,21 @@ def main() -> None:
                              '(default: 0.75)')
     parser.add_argument('--min-size', type=int, default=20,
                         help='Discard regions smaller than this many voxels '
-                             '(default: 10)')
+                             '(default: 20)')
     parser.add_argument('--out-dir', type=str, default=None,
                         help='Output directory (default: same folder as h5_path)')
     args = parser.parse_args()
 
     h5_path = args.h5_path or _pick_h5_via_dialog()
-    out_dir = os.path.join(
-        args.out_dir or os.path.dirname(os.path.abspath(h5_path)),
-        'corr_output')
+    segmentation_corr(h5_path,
+                      rolling_window=args.rolling_window,
+                      active_percentile=args.active_percentile,
+                      corr_seed=args.corr_seed,
+                      min_distance=args.min_distance,
+                      corr_grow=args.corr_grow,
+                      min_size=args.min_size,
+                      out_dir=args.out_dir)
 
-    try:
-        import scapeio
-        rec_path = os.path.dirname(os.path.abspath(h5_path))
-        voxel_size = np.array(scapeio.get_voxel_size(rec_path, '50 mm Navitar',
-                                                     deskewed=True))
-        aspect_ratio = voxel_size[1] / voxel_size[2]
-        print(f'Voxel size: {voxel_size[0]:.3f} x {voxel_size[1]:.3f} x '
-              f'{voxel_size[2]:.3f} µm  (aspect ratio: {aspect_ratio:.4f})')
-    except Exception as e:
-        print(f'Could not get voxel size from scapeio ({e}), '
-              f'assuming isotropic voxels — min-distance treated as voxels')
-        voxel_size = np.ones(3)
-        aspect_ratio = 1.0
-
-    # 1. Load
-    active_video_flat, active_mask, std_image = load_data(h5_path)
-
-    # 2. Preprocess: active frames only for correlation computation
-    signal_active, _ = preprocess(active_video_flat,
-                                   rolling_window=args.rolling_window,
-                                   active_frame_percentile=args.active_percentile)
-    traces_norm = normalize_traces(signal_active)
-
-    # 3. Local correlation image
-    corr_image = compute_local_correlation(traces_norm, active_mask)
-
-    # 4. Find seeds (sorted by descending correlation)
-    seeds, seed_corr = find_seeds(corr_image, active_mask,
-                                   corr_threshold=args.corr_seed,
-                                   min_distance_um=args.min_distance,
-                                   voxel_size=voxel_size)
-
-    # 5. Region growing
-    Z, X, Y = active_mask.shape
-    N = int(active_mask.sum())
-    idx_vol = np.full((Z, X, Y), -1, dtype=np.int32)
-    idx_vol[active_mask] = np.arange(N, dtype=np.int32)
-
-    labels, labels_3d = grow_regions(seeds, traces_norm, active_mask, idx_vol,
-                                      corr_threshold=args.corr_grow,
-                                      min_region_size=args.min_size)
-
-    # 6. Temporal traces on full preprocessed signal (all frames)
-    signal_full = preprocess_full(active_video_flat,
-                                   rolling_window=args.rolling_window)
-    temporal_traces = compute_temporal_traces(labels, signal_full)
-
-    # 7. Save
-    params = dict(rolling_window=args.rolling_window,
-                  active_percentile=args.active_percentile,
-                  corr_seed=args.corr_seed,
-                  min_distance_um=args.min_distance,
-                  voxel_size=list(voxel_size),
-                  corr_grow=args.corr_grow,
-                  min_size=args.min_size)
-    save_results(os.path.join(out_dir, 'segmentation_corr.h5'),
-                 labels, labels_3d, temporal_traces, corr_image,
-                 seeds, active_mask, params)
-
-    # 8. Visualize
-    plot_results(corr_image, labels_3d, seeds, temporal_traces, active_mask,
-                 aspect_ratio=aspect_ratio, voxel_size=voxel_size,
-                 out_dir=out_dir)
 
 
 if __name__ == '__main__':
