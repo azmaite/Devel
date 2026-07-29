@@ -9,14 +9,18 @@ dependencies = [
     "h5py>=3.16.0",
     "matplotlib>=3.11.0",
     "numpy>=2.4.6",
+    "numpy-stl>=4.0.0",
     "opencv-python-headless>=4.13.0.92",
-    "parallel-video-io==0.1.10a0",
+    "parallel-video-io==0.1.10a2",
     "pathlib>=1.0.1",
+    "pynrrd>=1.1.3",
+    "scapeio",
     "scikit-image>=0.26.0",
     "scikit-learn>=1.9.0",
     "scipy>=1.17.1",
     "tifffile>=2026.3.3",
     "tqdm>=4.68.3",
+    "wkw>=1.1.24",
 ]
 
 [dependency-groups]
@@ -24,3 +28,6 @@ dev = [
     "ipykernel>=7.3.0",
     "pytest>=9.1.1",
 ]
+
+[tool.uv.sources]
+scapeio = { path = "../scapeio", editable = true }
