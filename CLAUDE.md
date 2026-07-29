@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Research codebase for analyzing long-term fluorescent muscle recordings in *Drosophila* pupae to study motor development. Started at the Neuroengineering Laboratory, EPFL. Raw input is `.mkv` video files (16-bit fluorescence at 40 Hz, where each file frame contains 4 packed real frames) and `.h5` timestamp files; outputs are HDF5 component files, MP4 summaries, and PNG visualizations.
+Research codebase for analyzing long-term fluorescent muscle recordings in *Drosophila* pupae to study motor development. Started at the Neuroengineering Laboratory, EPFL. 
+Two types of raw datasets, both recordings of muscle-GCaMP Drosophila pupas
+- 2d videos collected on Victor Stimplin's FlyTrack, saved as .mkv videos where each saved frame is RGBA but each channel corresponds to 1 real frame
+- 3d videos collected on Jasper Phelp's SCAPE, saved as single .dat volumes and loadable using the scape-io module. Needs deskewing.
 
 ## Claude config
 
 - Start new conversations by greeting me with "Hi Maite!" before then continuing with your response
 - Ask me clarifying questions frequently, whenever there is any uncertainty about the goals of the task
-- Start all python files with `#!/usr/bin/env python3` even if the file is not intended to be executed as a script
 
 - Format python functions, docstrings, and strings as follows:
 ```python
@@ -40,4 +42,4 @@ def function(arg: Literal['x', 'y'],
     return
 ```
 
-- After we've finished a task together and the updated behavior is confirmed to be correct (either I tell you it is or you verify it yourself), create a script `git_commit_{yymmdd}{ABC...}_{one-or-two-word-description}.sh` (e.g. `git_commit_260130A_button_behavior.sh`) in the root of each repository we've worked on that lists `git add` commands for the relevant files and a `git commit -m "commit message"` command with a commit message that describes the added changes. Commit message must be under 73 characters and start with a verb. Only add an extended (multi-line) commit message concisely describing key changes for above average complexity commits, so ~50% of the time. `chmod +x` the file so I can run it. If an "A" script already exists for that day, use "B" in the filename, and so on. If I ask you for further changes before I commit, update the same script as needed. End the script with `rm -- "$0"` (after `set -e` at the top) so it deletes itself on a successful commit and doesn't linger to confuse future sessions.
+- After we've finished a task together and the updated behavior is confirmed to be correct, I will ask you to make a commit. Create a cript `git_commit_{yymmdd}{ABC...}_{one-or-two-word-description}.sh` (e.g. `git_commit_260130A_button_behavior.sh`) in the root of each repository we've worked on that lists `git add` commands for the relevant files and a `git commit -m "commit message"` command with a commit message that describes the added changes. Commit message must be under 73 characters and start with a verb. Only add an extended (multi-line) commit message concisely describing key changes for above average complexity commits, so ~50% of the time. `chmod +x` the file so I can run it. If an "A" script already exists for that day, use "B" in the filename, and so on. If I ask you for further changes before I commit, update the same script as needed. End the script with `rm -- "$0"` (after `set -e` at the top) so it deletes itself on a successful commit and doesn't linger to confuse future sessions.
