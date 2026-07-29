@@ -379,6 +379,7 @@ dependencies = [
     { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "tifffile", version = "2026.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "tqdm" },
+    { name = "wkw" },
 ]
 
 [package.dev-dependencies]
@@ -404,6 +405,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "tifffile", specifier = ">=2026.3.3" },
     { name = "tqdm", specifier = ">=4.68.3" },
+    { name = "wkw", specifier = ">=1.1.24" },
 ]
 
 [package.metadata.requires-dev]
@@ -2436,3 +2438,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/96/42/3e5985a0a7e57de470b320c6d6a1a67c844f6737a587f3d44dd13d1819e7/wcwidth-0.8.2-py3-none-any.whl", hash = "sha256:d63947694a0539a1d51e01eda7caf800c291020e6cdd7e28ad7b14dd33ad4f85", size = 323166, upload-time = "2026-06-29T18:11:09.888Z" },
 ]
 
+[[package]]
+name = "wkw"
+version = "1.1.24"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/93/4546af977e267a204e054163e1991445af40431cddf8af48a4c1bc66e3b2/wkw-1.1.24.tar.gz", hash = "sha256:d9ababce58b834d0cc4c4f7cfc8243cd26487a6ef3ab776736c34f393ff81d35", size = 260225, upload-time = "2024-07-11T13:36:26.236Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a2/ae/2719ac6fe8c748a1c69ad3e10cf123a972cf18899ffa7be5ce3829b45142/wkw-1.1.24-py3-none-macosx_10_9_universal2.whl", hash = "sha256:4967cc8d2564b1a3539fe755943b7c11ef69a4bd0ab3d67ac56a83513221e3ab", size = 443632, upload-time = "2024-07-11T13:36:21.78Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/a4/6a18163643920572e4dcd947d0a0df1734400da95036d93b2633c0c31094/wkw-1.1.24-py3-none-manylinux2014_x86_64.whl", hash = "sha256:aba4e708f055e21d67a4d983298b2c33c696742c255c40d4f15b08138de14ed7", size = 259063, upload-time = "2024-07-11T13:36:23.402Z" },
+    { url = "https://files.pythonhosted.org/packages/06/2f/4572ebe3532d78ffa653136328174e37684adc2152d757181ebc9f0f8443/wkw-1.1.24-py3-none-win_amd64.whl", hash = "sha256:553d2f977cf6753a716a40fd5ddde1b7ea937d9f96a688ffbf44a9e4ba74d837", size = 128632, upload-time = "2024-07-11T13:36:24.857Z" },
+]
