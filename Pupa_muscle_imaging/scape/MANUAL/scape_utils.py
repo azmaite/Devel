@@ -9,18 +9,26 @@ It assumes the following folder structure (if not, it will fix it):
 ---- sample#_run# : subfolder folder containing raw data (.dat) files (scape_raw_path)
 ---- sample#_run#_info.mat : metadata file for the SCAPE recording
 ---- analysis : folder containing analysis results (analysis_path)
---- analysis_sample# : folder containing analysis results for several recordings for the same sample (analysis_combined_path)
+--- analysis_sample# : folder containing analysis results for several recordings for the 
+    same sample (analysis_combined_path)
 
 load_napari_rois: load manually segmented ROIs from napari saved in NRRD format
-_check_folder_structure: check if the folder structure is correct for SCAPE data path (whether the .dat files are inside a subfolder with the same name and whether there is a matching _info.mat file). If not, it will fix it by creating the subfolder and moving the files. Raises errors if the structure is not correct and cannot be fixed.
+_check_folder_structure: check if the folder structure is correct for SCAPE data path 
+    (whether the .dat files are inside a subfolder with the same name and whether there is a matching _info.mat file). If not, it will fix it by creating the subfolder and moving the files. Raises errors if the structure is not correct and cannot be fixed.
 load_voxel_size: get voxel size of a deskewed scape 3D video (XYZ)
 load_aspect_ratio_YX: get aspect ratio of a scape 3D video for Y/X (most common view)
-load_max_proj: load the maximum projection of a SCAPE 3D video. If not already calculated, will do it and save it in the analysis folder.
+load_proj: load the specified projection ('max_proj', 'min_proj', or 'std_image') of a 
+    SCAPE 3D video. If not already calculated, will compute and save all projection images.
+_load_num_volumes: get the number of volumes in a SCAPE recording
+_get_projection_images: compute the std, maximum, and minimum projection images of a
+    SCAPE 3D video and save them in the analysis folder, both in an h5 file and as
+    OME-TIFFs calibrated with the recording's voxel size for napari
 """
 
 import nrrd
 import numpy as np
 import scapeio
+import tifffile
 from pathlib import Path
 import tqdm
 import h5py
@@ -204,6 +212,9 @@ def _get_projection_images(scape_path: str | Path, batch_size: int = 50):
     Get the std, maximum and minimum projection images of a SCAPE 3D video
     and save them in the analysis folder as projection_images.h5.
     (for the std image, it will also save the sum_x, sum_x2 and frame_count to be able to combine the std images later)
+    Also saves `std_image`, `min_proj`, and `max_proj` as OME-TIFFs
+    (`{proj_type}.ome.tif`), calibrated with the recording's voxel size
+    (see `load_voxel_size`) so they open correctly scaled in napari.
 
     Parameters
     ----------
@@ -279,6 +290,18 @@ def _get_projection_images(scape_path: str | Path, batch_size: int = 50):
                 del f[name]
             f.create_dataset(name, data=data)
     print(f'Saved min_proj, max_proj, sum_x, sum_x2, frame_count, std_image to {h5_path}')
-    
+
+    # also save std_image, min_proj and max_proj as OME-TIFFs, calibrated with the
+    # recording's voxel size, so they open correctly scaled in napari
+    voxel_size = load_voxel_size(scape_path)
+    tiff_metadata = {'axes': 'ZYX',
+                     'PhysicalSizeX': voxel_size['x'], 'PhysicalSizeXUnit': 'um',
+                     'PhysicalSizeY': voxel_size['y'], 'PhysicalSizeYUnit': 'um',
+                     'PhysicalSizeZ': voxel_size['z'], 'PhysicalSizeZUnit': 'um'}
+    for proj_type, data in (('std_image', std_image), ('min_proj', min_proj), ('max_proj', max_proj)):
+        tiff_path = analysis_path / f'{proj_type}.ome.tif'
+        tifffile.imwrite(tiff_path, data.transpose(0, 2, 1), ome=True, metadata=tiff_metadata)
+    print(f'Saved std_image, min_proj, max_proj as OME-TIFFs to {analysis_path}')
+
 
 
