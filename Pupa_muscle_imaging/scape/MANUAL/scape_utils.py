@@ -13,9 +13,16 @@ It assumes the following folder structure (if not, it will fix it):
     same sample (analysis_combined_path)
 
 load_napari_rois: load manually segmented ROIs from napari saved in NRRD format
-check_folder_structure: check if the folder structure is correct for SCAPE data path 
-    (whether the .dat files are inside a subfolder with the same name and whether there is a matching _info.mat file). If not, it will fix it by creating the subfolder and moving the files. Raises errors if the structure is not correct and cannot be fixed.
-load_voxel_size: get voxel size of a deskewed scape 3D video (XYZ)
+is_combined_path: check whether a path is a sample#_combined folder rather than a
+    single-run sample#_run# folder
+analysis_path_for: get the folder containing a SCAPE path's projection images/activity
+    plot - itself for a sample#_combined folder, or its analysis subfolder for a
+    sample#_run# folder
+check_folder_structure: check if the folder structure is correct for SCAPE data path
+    (whether the .dat files are inside a subfolder with the same name and whether there is a matching _info.mat file). If not, it will fix it by creating the subfolder and moving the files. Raises errors if the structure is not correct and cannot be fixed. A no-op for a sample#_combined folder, which has no raw data of its own.
+load_voxel_size: get voxel size of a deskewed scape 3D video (XYZ). For a sample#_combined
+    folder, read back from its max_proj.ome.tif metadata instead of raw data, which it
+    doesn't have.
 load_aspect_ratio_YX: get aspect ratio of a scape 3D video for Y/X (most common view)
 load_proj: load the specified projection ('max_proj', 'min_proj', or 'std_image') of a
     SCAPE 3D video. If not already calculated, will compute and save all projection images.
@@ -35,6 +42,7 @@ import nrrd
 import numpy as np
 import scapeio
 import tifffile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import tqdm
 import h5py
@@ -65,26 +73,75 @@ def load_napari_rois(roi_path: str | Path) -> np.ndarray:
     return np.transpose(rois, (2, 1, 0))
 
 
+def is_combined_path(scape_path: str | Path) -> bool:
+    """
+    Check whether `scape_path` is a `sample#_combined` folder (see
+    `combine_sample_projections`), rather than a single-run
+    `sample#_run#` folder.
+
+    Parameters
+    ----------
+    scape_path : str | Path
+        Path to check.
+
+    Returns
+    -------
+    bool
+    """
+    return Path(scape_path).name.endswith('_combined')
+
+
+def analysis_path_for(scape_path: str | Path) -> Path:
+    """
+    Get the folder containing a SCAPE path's projection images/activity
+    plot: `scape_path` itself for a `sample#_combined` folder (see
+    `combine_sample_projections`, which writes directly there), or
+    `scape_path / ANALYSIS_PATH_NAME` for a single-run `sample#_run#`
+    folder (see `get_projection_images`).
+
+    Parameters
+    ----------
+    scape_path : str | Path
+        Path to the SCAPE data folder.
+
+    Returns
+    -------
+    Path
+    """
+    scape_path = Path(scape_path)
+    return scape_path if is_combined_path(scape_path) else scape_path / ANALYSIS_PATH_NAME
+
+
 def check_folder_structure(scape_path: str | Path):
     """
-    Check if the folder structure is correct for SCAPE data path
-    (whether the .dat files are inside a subfolder with the same name
-    and whether there is a matching _info.mat file).
-    If not, it will fix it by creating the subfolder and moving the files.
-    Raises errors if the structure is not correct and cannot be fixed.
-    
+    Check if the folder structure is correct for a SCAPE data path.
+
+    A `sample#_combined` folder (see `combine_sample_projections`) has
+    no raw data of its own - it's just projections/activity combined
+    from several runs - so nothing is checked for one beyond its name.
+
+    For a `sample#_run#` folder, checks whether the .dat files are
+    inside a subfolder with the same name and whether there is a
+    matching _info.mat file. If not, it will fix it by creating the
+    subfolder and moving the files. Raises errors if the structure is
+    not correct and cannot be fixed.
+
     Parameters
     ----------
     path : str | Path
-        Path to the scape folder to check.   
+        Path to the scape folder to check.
     """
     scape_path = Path(scape_path)
+
+    if is_combined_path(scape_path):
+        return
 
     # check that the path name is sample#_run#
     base_name = scape_path.name
     if not base_name.startswith('sample') or '_run' not in base_name:
-        raise ValueError(f"Path name {base_name} does not match expected format 'sample#_run#'.")
-    
+        raise ValueError(f"Path name {base_name} does not match expected format "
+                         f"'sample#_run#' or 'sample#_combined'.")
+
     # check that the scape_raw_path was not mistakenly passed to this function instead of the scape_path
     # (in that case, the parent folder has the same name)
     # to avoid recursively moving files inside further subfolders
@@ -124,6 +181,13 @@ def load_voxel_size(scape_path: str | Path) -> dict:
     """
     Get the voxel size of a deskewed SCAPE 3D image (XYZ).
 
+    A `sample#_combined` folder (see `combine_sample_projections`) has
+    no raw data of its own to query for this, so its voxel size is read
+    back instead from `max_proj.ome.tif`'s embedded OME-XML metadata -
+    the same values, written there (as `voxel_size['x']`/`['y']`/`['z']`
+    verbatim) when the projections were computed/combined (see
+    `get_projection_images`/`combine_sample_projections`).
+
     Parameters
     ----------
     scape_path : str | Path
@@ -138,6 +202,17 @@ def load_voxel_size(scape_path: str | Path) -> dict:
 
     scape_path = Path(scape_path)
     check_folder_structure(scape_path)
+
+    if is_combined_path(scape_path):
+        tiff_path = analysis_path_for(scape_path) / 'max_proj.ome.tif'
+        with tifffile.TiffFile(tiff_path) as tif:
+            ome_root = ET.fromstring(tif.ome_metadata)
+        ns = {'ome': 'http://www.openmicroscopy.org/Schemas/OME/2016-06'}
+        pixels = ome_root.find('.//ome:Pixels', ns)
+        return {'z': float(pixels.attrib['PhysicalSizeZ']),
+                'x': float(pixels.attrib['PhysicalSizeX']),
+                'y': float(pixels.attrib['PhysicalSizeY'])}
+
     scape_raw_path = scape_path / scape_path.name
 
     tube_lens = '50 mm Navitar' #always!
@@ -187,7 +262,7 @@ def load_proj(scape_path: str | Path, proj_type: str) -> np.ndarray:
 
     scape_path = Path(scape_path)
     check_folder_structure(scape_path)
-    h5_path = scape_path / ANALYSIS_PATH_NAME / PROJECTION_FILE_NAME
+    h5_path = analysis_path_for(scape_path) / PROJECTION_FILE_NAME
 
     if not h5_path.exists():
         print(f"Projection images not found. Computing them...")
@@ -212,12 +287,18 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
     Parameters
     ----------
     scape_path : str | Path
-        Path to the folder containing the SCAPE data.
+        Path to the folder containing the SCAPE data. Must be a single
+        `sample#_run#` folder, not a `sample#_combined` one - a
+        combined folder has no raw data of its own to compute these
+        from (see `combine_sample_projections` instead).
     batch_size : int
         Number of volumes to load per batch.
     """
     # set save path
     scape_path = Path(scape_path)
+    if is_combined_path(scape_path):
+        raise ValueError(f"{scape_path} is a sample#_combined folder, which has no raw "
+                         f"data of its own - use combine_sample_projections instead.")
     check_folder_structure(scape_path)
     analysis_path = scape_path / ANALYSIS_PATH_NAME
     h5_path = analysis_path / PROJECTION_FILE_NAME
@@ -380,7 +461,7 @@ def combine_sample_projections(exp_folder: str | Path, sample_name: str, run_pat
     cumulative_time = 0.0
 
     for scape_path in run_paths:
-        h5_path = scape_path / ANALYSIS_PATH_NAME / PROJECTION_FILE_NAME
+        h5_path = analysis_path_for(scape_path) / PROJECTION_FILE_NAME
         with h5py.File(h5_path, 'r') as f:
             run_sum_x = f['sum_x'][:]
             run_sum_x2 = f['sum_x2'][:]
