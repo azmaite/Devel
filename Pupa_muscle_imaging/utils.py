@@ -152,7 +152,7 @@ def diff_norm_frames(frames: np.ndarray,
     frames_dif[frames_dif < 0] = 0
 
     if rolling_win is not None:
-        rolling_min = ndimage.minimum_filter1d(signal, size=rolling_win, axis=0, mode='nearest')
+        rolling_min = ndimage.minimum_filter1d(frames_dif, size=rolling_win, axis=0, mode='nearest')
         frames_dif = frames_dif - rolling_min
 
     frames_dif_norm = (frames_dif - np.nanmin(frames_dif)) / (np.nanmax(frames_dif) - np.nanmin(frames_dif))
