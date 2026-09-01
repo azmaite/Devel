@@ -31,11 +31,14 @@ import h5py
 import datetime
 import argparse
 import h5py
+from pathlib import Path
 
 import matplotlib
 matplotlib.use('Agg')  # Force Matplotlib to use a non-interactive backend
 import matplotlib.pyplot as plt
 
+import sys
+sys.path.append(str(Path('/home/azcorra/git/Devel/Pupa_muscle_imaging')))
 import utils
 
 MAIN_PATH = '/mnt/labserver/data/MA/Development_project/Pupa_muscle_long_recordings/'
@@ -154,11 +157,14 @@ def _preprocess(mkv_file: str) -> None:
     min_proj = np.full_like(frame_0, fill_value=65535, dtype=np.uint16)
 
     # initialize the frames list to save the frames for median calculation
-    frames_array = np.zeros((24000, frame_0.shape[0], frame_0.shape[1]), dtype=np.uint16)
+    # (not all frames, but no space, should be fine)
+    max_n = 12000
+    frames_array = np.zeros((max_n, frame_0.shape[0], frame_0.shape[1]), dtype=np.uint16)
 
     # Define the codec and create VideoWriter object for the mp4 video
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     mp4_path = os.path.join(dir, MP4_SAVE_NAME)
+    frame_rate = 20
     mp4 = cv2.VideoWriter(mp4_path, fourcc, frame_rate, frame_0.shape[::-1])
 
     # iterate through all the frames
@@ -179,7 +185,8 @@ def _preprocess(mkv_file: str) -> None:
             act.append(np.mean(img[:,:,j].astype(np.int32)))
 
             # add to frames list for median calculation
-            frames_array[n] = img_i
+            if n < len(frames_array):
+                frames_array[n] = img_i
 
             # convert to uint8 by normalizing 0-255 (for mp4 video)
             clip = 600
