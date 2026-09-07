@@ -33,7 +33,8 @@ get_projection_images: compute the std, maximum, and minimum projection images, 
     recording's voxel size / volume rate for napari and easy viewing
 combine_sample_projections: combine projection images and activity traces from several
     runs of the same sample and save them (as h5, OME-TIFFs, and a combined activity PNG
-    with dotted lines marking run boundaries) to a new sample#_combined folder
+    with dotted lines marking run boundaries) to a new sample#_combined folder, recording
+    the combined runs' names as a `source_runs` attribute on the h5 file
 _plot_activity: plot an activity trace (mean fluorescence per volume) over time and save
     it as a PNG, optionally marking run boundaries with vertical dotted lines
 """
@@ -435,7 +436,9 @@ def combine_sample_projections(exp_folder: str | Path, sample_name: str, run_pat
     same sample and save them to a new sample#_combined folder: the
     projections as an h5 file and calibrated OME-TIFFs, and the combined
     activity trace as an h5 dataset and a PNG plot (with vertical dotted
-    lines marking the boundaries between runs).
+    lines marking the boundaries between runs). The names of the combined
+    `sample#_run#` folders are saved as a `source_runs` attribute on the
+    h5 file, in the same order they were combined.
 
     Parameters
     ----------
@@ -506,6 +509,7 @@ def combine_sample_projections(exp_folder: str | Path, sample_name: str, run_pat
             if name in f:
                 del f[name]
             f.create_dataset(name, data=data)
+        f.attrs['source_runs'] = [scape_path.name for scape_path in run_paths]
     print(f'Saved combined min_proj, max_proj, sum_x, sum_x2, frame_count, std_image, activity to {h5_path}')
 
     voxel_size = load_voxel_size(run_paths[0])
