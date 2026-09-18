@@ -28,9 +28,10 @@ load_proj: load the specified projection ('max_proj', 'min_proj', or 'std_image'
     SCAPE 3D video. If not already calculated, will compute and save all projection images.
 get_projection_images: compute the std, maximum, and minimum projection images, and an
     activity trace (mean fluorescence per volume, ignoring zero voxels), of a SCAPE 3D
-    video. Saves the projections and activity trace in the analysis folder, both in an h5
-    file and as OME-TIFFs (projections) / a PNG plot (activity) calibrated with the
-    recording's voxel size / volume rate for napari and easy viewing
+    video. Saves the projections, activity trace, and voxel size (`voxel_sizes_xyz`) in
+    the analysis folder, both in an h5 file and as OME-TIFFs (projections) / a PNG plot
+    (activity) calibrated with the recording's voxel size / volume rate for napari and
+    easy viewing
 combine_sample_projections: combine projection images and activity traces from several
     runs of the same sample and save them (as h5, OME-TIFFs, and a combined activity PNG
     with dotted lines marking run boundaries) to a new sample#_combined folder, recording
@@ -280,6 +281,7 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
     of a SCAPE 3D video, and save them in the analysis folder as
     projection_images.h5.
     (for the std image, it will also save the sum_x, sum_x2 and frame_count to be able to combine the std images later)
+    Also saves the recording's voxel size as `voxel_sizes_xyz` (see `load_voxel_size`).
     Also saves `std_image`, `min_proj`, and `max_proj` as OME-TIFFs
     (`{proj_type}.ome.tif`), calibrated with the recording's voxel size
     (see `load_voxel_size`) so they open correctly scaled in napari, and the
@@ -363,6 +365,7 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
     # SAVE the results
     analysis_path = scape_path / "analysis"
     analysis_path.mkdir(exist_ok=True)
+    voxel_size = load_voxel_size(scape_path)
 
     with h5py.File(h5_path, 'a') as f:
         for name, data in (('sum_x', sum_x),
@@ -371,7 +374,8 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
                            ('min_proj', min_proj),
                            ('max_proj', max_proj),
                            ('frame_count', frame_count),
-                           ('activity', activity)):
+                           ('activity', activity),
+                           ('voxel_sizes_xyz', [voxel_size['x'],voxel_size['y'],voxel_size['z']])):
             if name in f:
                 del f[name]
             f.create_dataset(name, data=data)
@@ -380,7 +384,6 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
 
     # also save std_image, min_proj and max_proj as OME-TIFFs, calibrated with the
     # recording's voxel size, so they open correctly scaled in napari
-    voxel_size = load_voxel_size(scape_path)
     tiff_metadata = {'axes': 'ZYX',
                      'PhysicalSizeX': voxel_size['x'], 'PhysicalSizeXUnit': 'um',
                      'PhysicalSizeY': voxel_size['y'], 'PhysicalSizeYUnit': 'um',
