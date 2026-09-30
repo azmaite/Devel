@@ -8,6 +8,7 @@ It assumes the following folder structure (if not, it will fix it):
 --- sample#_run# : folder containing a single SCAPE recording (scape_path)
 ---- sample#_run# : subfolder folder containing raw data (.dat) files (scape_raw_path)
 ---- sample#_run#_info.mat : metadata file for the SCAPE recording
+---- sample#_run#_stim_data.bin : DAQ voltage traces for the SCAPE recording
 ---- analysis : folder containing analysis results (analysis_path)
 --- analysis_sample# : folder containing analysis results for several recordings for the 
     same sample (analysis_combined_path)
@@ -19,7 +20,11 @@ analysis_path_for: get the folder containing a SCAPE path's projection images/ac
     plot - itself for a sample#_combined folder, or its analysis subfolder for a
     sample#_run# folder
 check_folder_structure: check if the folder structure is correct for SCAPE data path
-    (whether the .dat files are inside a subfolder with the same name and whether there is a matching _info.mat file). If not, it will fix it by creating the subfolder and moving the files. Raises errors if the structure is not correct and cannot be fixed. A no-op for a sample#_combined folder, which has no raw data of its own.
+    (whether the raw data (.dat files, .nrrd copy and acquisition metadata) are inside a
+    subfolder with the same name and whether the matching _info.mat/_stim_data.bin files are
+    next to it). If not, it will fix it by moving the files. Raises errors if the structure is
+    not correct and cannot be fixed. A no-op for a sample#_combined folder, which has no raw
+    data of its own.
 load_voxel_size: get voxel size of a deskewed scape 3D video (XYZ). For a sample#_combined
     folder, read back from its max_proj.ome.tif metadata instead of raw data, which it
     doesn't have.
@@ -122,11 +127,16 @@ def check_folder_structure(scape_path: str | Path):
     no raw data of its own - it's just projections/activity combined
     from several runs - so nothing is checked for one beyond its name.
 
-    For a `sample#_run#` folder, checks whether the .dat files are
-    inside a subfolder with the same name and whether there is a
-    matching _info.mat file. If not, it will fix it by creating the
-    subfolder and moving the files. Raises errors if the structure is
-    not correct and cannot be fixed.
+    For a `sample#_run#` folder (including `sample#_run#_HR` ones),
+    checks whether the matching `_info.mat` and `_stim_data.bin` files
+    are inside it, and whether the raw data (.dat files, a converted
+    .nrrd, `acquisitionmetadata.ini`, `Spooled files.sifx` and the
+    `ModifiedData` folder) are inside a subfolder with the same name.
+    If not, it will fix it by moving `_info.mat`/`_stim_data.bin` in
+    from the parent folder (as acquired) or up from the subfolder (where
+    an older version of this function wrongly put them), and by creating
+    the subfolder and moving the raw data into it. Raises errors if the
+    structure is not correct and cannot be fixed.
 
     Parameters
     ----------
@@ -151,33 +161,36 @@ def check_folder_structure(scape_path: str | Path):
     if parent_path.name == base_name:
         raise ValueError(f"Parent folder has the same name as the scape_path, probably scape_raw_path was passed. Please check the folder structure.")
 
-    # check that there is a _info.mat file inside
-    info_file = scape_path / f"{base_name}_info.mat"
-    if not info_file.exists():
-        print(f"Info file not found in scape_path. Checking parent folder...")
-        
-        info_file = parent_path / f"{base_name}_info.mat"
-        if not info_file.exists():
-            raise FileNotFoundError(f"Info file not found in parent folder either. Please check the folder structure.")
-        
+    # check that there is a _info.mat file inside scape_path (next to scape_raw_path, where
+    # scapeio expects it). If not, look for it in the parent folder (as acquired) or inside
+    # scape_raw_path (where an older version of this function wrongly moved it)
+    scape_raw_path = scape_path / base_name
+    for file_suffix in ('_info.mat', '_stim_data.bin'):
+        file_name = f"{base_name}{file_suffix}"
+        if (scape_path / file_name).exists():
+            continue
+        for other_path in (parent_path, scape_raw_path):
+            if (other_path / file_name).exists():
+                print(f"Moving {file_name} from {other_path} into {scape_path}...")
+                (other_path / file_name).rename(scape_path / file_name)
+                break
         else:
-            # move the .dat files to a subfolder with the same name as the scape_path
-            print(f"Info file found in parent folder. Moving .dat files to subfolder...")
-            scape_raw_path = scape_path / base_name
-            scape_raw_path.mkdir(exist_ok=True)
-            # move _info.mat file and _stim_data.bin file
-            info_file.rename(scape_raw_path / info_file.name)
-            stim_file = parent_path / f"{base_name}_stim_data.bin"
-            if stim_file.exists():
-                stim_file.rename(scape_raw_path / stim_file.name)
-            # move .dat files
-            for n, dat_file in enumerate(scape_path.glob(f"*.dat")):
-                dat_file.rename(scape_raw_path / dat_file.name)
-            # move ModifiedData folder
-            modified_data_folder = scape_path / "ModifiedData"
-            if modified_data_folder.exists():
-                modified_data_folder.rename(scape_raw_path / "ModifiedData")
-            print(f"Files moved successfully ({n+1} .dat files moved).")
+            if file_suffix == '_info.mat':
+                raise FileNotFoundError(f"Info file {file_name} not found in {scape_path}, its parent "
+                                        f"folder, or {scape_raw_path}. Please check the folder structure.")
+
+    # move the raw data (and the other files created during acquisition, which scapeio
+    # expects next to the .dat files) into a subfolder with the same name as the scape_path
+    raw_files = [p for p in scape_path.iterdir()
+                 if p.suffix in ('.dat', '.nrrd')
+                 or p.name in ('ModifiedData', 'acquisitionmetadata.ini', 'Spooled files.sifx')]
+    if raw_files:
+        print(f"Moving raw data files into {scape_raw_path}...")
+        scape_raw_path.mkdir(exist_ok=True)
+        for raw_file in raw_files:
+            raw_file.rename(scape_raw_path / raw_file.name)
+        n_dat = sum(p.suffix == '.dat' for p in raw_files)
+        print(f"Files moved successfully ({n_dat} .dat files and {len(raw_files) - n_dat} other files moved).")
 
 def load_voxel_size(scape_path: str | Path) -> dict:
     """

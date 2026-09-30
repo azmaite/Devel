@@ -3,9 +3,11 @@ Script to preprocess a scape experiment
 Takes as input the folder for a scape experiment.
 Expects the folder to contain subfolders called sample#_run#,
 some with _HR in the end (high-resolution single-volume recordings).
-First, every _HR folder that still has raw .dat files is converted (not deskewed) to a
-single nrrd file (sample#_run#_HR.nrrd, inside the _HR folder, via scapeio.convert),
-which is checked before the .dat files are deleted.
+First, the folder structure of every _HR folder is fixed like for normal runs (see
+scape_utils.check_folder_structure), and every _HR folder that still has raw .dat files is
+converted (not deskewed) to a single nrrd file (sample#_run#_HR/sample#_run#_HR/
+sample#_run#_HR.nrrd, via scapeio.convert), which is checked before the .dat files are
+deleted.
 Then lists all non-_HR folders, sorted by sample# then run#, each with an index, and asks
 which indices to keep (supports ranges, e.g. '2-5,7,9-12').
 Then, sample by sample, goes run by run and checks:
@@ -85,48 +87,24 @@ def _parse_index_ranges(indices_input: str) -> set[int]:
     return indices
 
 
-def _hr_scan_path(hr_path: Path) -> Path:
-    """
-    Get the folder scapeio should treat as the scan (the folder containing the
-    raw data, with a matching `_info.mat` file next to it) for a
-    `sample#_run#_HR` folder, which can be in either of two layouts:
-    - as acquired: raw data directly in `hr_path`, with `_info.mat` and
-      `_stim_data.bin` next to it in the experiment folder -> `hr_path`
-    - moved inside (as done by `scape_utils.check_folder_structure` for normal
-      runs): raw data in `hr_path / hr_path.name`, with `_info.mat` and
-      `_stim_data.bin` in `hr_path` -> `hr_path / hr_path.name`
-
-    Parameters
-    ----------
-    hr_path : Path
-        Path to a `sample#_run#_HR` folder.
-
-    Returns
-    -------
-    Path
-    """
-    nested_path = hr_path / hr_path.name
-    if nested_path.is_dir() and (hr_path / f'{hr_path.name}_info.mat').exists():
-        return nested_path
-    return hr_path
-
-
 def convert_HR_folders(exp_folder: str | Path) -> None:
     """
     Convert every high-resolution (single-volume) recording in an experiment
     folder, i.e. every `sample#_run#_HR` subfolder, to a single nrrd file with
     `scapeio.convert` (not deskewed), then delete its raw .dat files.
 
-    The nrrd is saved by scapeio inside the HR folder as `sample#_run#_HR.nrrd`
-    (with the raw voxel size in its header), so `scapeio.load_scan(hr_path, colors=1)`
+    First fixes the folder structure of each HR folder like for normal runs
+    (see `scape_utils.check_folder_structure`): `_info.mat` and `_stim_data.bin`
+    are moved into the HR folder and the raw data into an HR/HR subfolder (also
+    for HR folders converted before, which get their existing .nrrd moved).
+    The nrrd is saved by scapeio next to the raw data, as
+    `sample#_run#_HR/sample#_run#_HR/sample#_run#_HR.nrrd` (with the raw voxel
+    size in its header), so `scapeio.load_scan(hr_path / hr_path.name, colors=1)`
     loads it afterwards instead of the .dat files (and can then be deskewed with
     `scapeio.operations.deskew_scan`). Before deleting the .dat files, the nrrd is
     checked by loading it back and making sure it's a non-empty 3D volume, and by
     `scapeio.delete_dat_files` checking it's big enough to hold the full scan.
-    HR folders with no .dat files left (already converted) are skipped. Works
-    whether or not the raw data were already moved inside the HR folder (see
-    `_hr_scan_path`); if so, the nrrd is saved next to the raw data, in
-    `sample#_run#_HR/sample#_run#_HR/`.
+    HR folders with no .dat files left (already converted) are skipped.
 
     Parameters
     ----------
@@ -143,7 +121,8 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
     print(f'Found {len(hr_paths)} HR folders in {exp_folder}')
 
     for hr_path in hr_paths:
-        hr_path = str(_hr_scan_path(hr_path)) # string needed for scapeio
+        scape_utils.check_folder_structure(hr_path)
+        hr_path = str(hr_path / hr_path.name) # raw data folder, string needed for scapeio
         if not scapeio.io.list_dat_files(hr_path):
             print(f'No .dat files found in {hr_path}, skipping (already converted?)')
             continue
