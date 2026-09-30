@@ -17,24 +17,7 @@ folder = Path('/mnt/labserver/data/MA/SCAPE/20260716_MA12_pupa-P15/sample2_combi
 tif_list = [
             #folder / 'RLF-RLM_leg_segments.tif',
             folder / 'NMF_segmentation' / 'all_muscles_NMF_components.tif',
-            
-            # folder / 'NMF_segmentation' / 'LM_coxa_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'LM_trochanter_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'LM_femur_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'LM_tibia_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RM_coxa_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RM_trochanter_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RM_femur_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RM_tibia_NMF_components_12_joined.tif',
-
-            # folder / 'NMF_segmentation' / 'LF_coxa_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'LF_trochanter_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'LF_femur_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'LF_tibia_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RF_coxa_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RF_trochanter_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RF_femur_NMF_components_12_joined.tif',
-            # folder / 'NMF_segmentation' / 'RF_tibia_NMF_components_12_joined.tif',
+            folder / 'NMF_segmentation' / 'all_NMF_components.tif',
             ]
 
 voxel_sizes = load_voxel_size(folder)
