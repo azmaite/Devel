@@ -7,16 +7,25 @@ Operates on a folder containing one or more subfolders, each holding a single
 and a matching .h5 timestamp file. For each recording the script produces:
 
 - summary_video.mp4      : 8-bit compressed preview video
-- activity.png           : mean fluorescence over time
 - max_projection.png     : pixel-wise maximum across all frames
 - min_projection.png     : pixel-wise minimum across all frames
 - median.png             : per-pixel median frame (preview, clipped)
 - max_min_proj.h5        : unclipped max, min, median, and std projections
 
-If multiple recordings are found and the parent folder name encodes the
-puparium-formation time (format ``MM-DD_HHhMM``), a grid of max-projection
-images labelled with hours after puparium formation (APF) is also saved to
-``00_Figs/max_projection_grid.png``.
+The mean fluorescence over time (activity) plots of all recordings are saved
+together in ``<folder_path>/activity/``, named after the recording folder plus
+the hours after puparium formation (APF), e.g. ``<date_time>_XXhAPF.png``. If
+the parent folder name does not encode the puparium-formation time (format
+``MM-DD_HHhMM``), the hAPF suffix is omitted.
+
+If multiple recordings are found and the puparium-formation time can be
+extracted, a grid of max-projection images labelled with hours APF is also
+saved to ``00_Figs/max_projection_grid.png``. Each grid figure holds at most
+4 rows x 12 columns; if there are more recordings, several figures are saved
+(``max_projection_grid_1.png``, ``max_projection_grid_2.png``, ...). All grid
+images share the same contrast, computed from the saved (unclipped) max
+projections: vmin is their overall min and vmax is the median of their
+per-image max values.
 
 Example usages from the terminal:
         python3 preprocess_pupa_muscle.py
@@ -30,8 +39,8 @@ import cv2
 import h5py
 import datetime
 import argparse
-import h5py
 from pathlib import Path
+from typing import Optional
 
 import matplotlib
 matplotlib.use('Agg')  # Force Matplotlib to use a non-interactive backend
@@ -45,13 +54,15 @@ MAIN_PATH = '/mnt/labserver/data/MA/Development_project/Pupa_muscle_long_recordi
 
 # set the saving names
 MP4_SAVE_NAME = 'summary_video.mp4'
-ACT_SAVE_NAME = 'activity.png'
+ACT_FOLDER = 'activity'
 MIN_SAVE_NAME = 'min_projection.png'
 MAX_SAVE_NAME = 'max_projection.png'
 MEDIAN_SAVE_NAME = 'median.png'
 H5_SAVE_NAME = 'max_min_proj.h5'
 FIGS_FOLDER = '00_Figs'
 GRID_SAVE_NAME = 'max_projection_grid.png'
+GRID_MAX_ROWS = 4
+GRID_MAX_COLS = 12
 
 
 def preprocess_pupa_muscle(folder_path: str = '') -> None:
@@ -84,7 +95,10 @@ def preprocess_pupa_muscle(folder_path: str = '') -> None:
     assert os.path.isdir(folder_path), f'Folder path {folder_path} must be a directory'
 
     # get all .mkv files in the folder and subfolders
-    mkv_files = utils.get_mkv_list(folder_path=None)
+    mkv_files = utils.get_mkv_list(folder_path=folder_path)
+
+    # get the puparium formation time from the folder name (None if not possible)
+    time_0 = _get_time_0(folder_path)
 
     # check which videos have already been processed and skip
     skip_idx = []
@@ -93,7 +107,7 @@ def preprocess_pupa_muscle(folder_path: str = '') -> None:
         # check if all the outputs exist - if so, skip
         dir = os.path.dirname(mkv_file)
         if os.path.exists(os.path.join(dir, MP4_SAVE_NAME)) & \
-            os.path.exists(os.path.join(dir, ACT_SAVE_NAME)) & \
+            os.path.exists(_get_activity_path(folder_path, mkv_file, time_0)) & \
             os.path.exists(os.path.join(dir, MIN_SAVE_NAME)) & \
             os.path.exists(os.path.join(dir, MAX_SAVE_NAME)):
                 print(f'Already processed {os.path.basename(mkv_file)}, skip.')
@@ -109,29 +123,132 @@ def preprocess_pupa_muscle(folder_path: str = '') -> None:
             name = os.path.basename(mkv_file)
             # print the name of the video being processed and the time
             print(f'{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {i+1}/{len(mkv_files_todo)}: {name}')
-            _preprocess(mkv_file)
+            _preprocess(mkv_file, _get_activity_path(folder_path, mkv_file, time_0))
 
     # save grid image (if there are subfolders and
     # the puparium formation time can be extracted from the folder name)
     if len(mkv_files) > 1:
-        _save_grid_image(folder_path, mkv_files)
+        if time_0 is None:
+            print('Could not extract puparium formation time from folder name.')
+            print('  Will not generate grid image.')
+        else:
+            _save_grid_image(folder_path, mkv_files, time_0)
+
+
+def _get_time_0(folder_path: str) -> Optional[datetime.datetime]:
+    """
+    Extract the puparium formation time from the name of `folder_path`.
+
+    Uses the last two underscore-delimited tokens of the path (expected format
+    ``MM-DD_HHhMM``).
+
+    Parameters
+    ----------
+    folder_path : str
+        Parent folder whose name encodes the puparium formation time.
+
+    Returns
+    -------
+    datetime.datetime or None
+        Puparium formation time, or None if the folder name does not match.
+    """
+    try:
+        time_0_str = '_'.join(folder_path.rstrip('/').split('_')[-2:])
+        return datetime.datetime.strptime(time_0_str, '%m-%d_%Hh%M')
+    except ValueError:
+        return None
+
+
+def _get_recording_time(mkv_file: str) -> tuple[str, datetime.datetime]:
+    """
+    Get the recording date/time encoded in the .mkv filename.
+
+    Parameters
+    ----------
+    mkv_file : str
+        Path to the .mkv video file.
+
+    Returns
+    -------
+    time_t_str : str
+        Date/time string as found in the filename (``MMDD_HHMM``).
+    time_t : datetime.datetime
+        Parsed recording time.
+    """
+    time_t_str = os.path.basename(mkv_file)[-24:-15]
+    time_t = datetime.datetime.strptime(time_t_str, '%m%d_%H%M')
+    return time_t_str, time_t
+
+
+def _get_hours_apf(mkv_file: str,
+                   time_0: datetime.datetime) -> int:
+    """
+    Calculate the hours after puparium formation (APF) of a recording.
+
+    Parameters
+    ----------
+    mkv_file : str
+        Path to the .mkv video file (its name encodes the recording time).
+    time_0 : datetime.datetime
+        Puparium formation time, see `_get_time_0()`.
+
+    Returns
+    -------
+    int
+        Hours APF, rounded to the nearest hour.
+    """
+    _, time_t = _get_recording_time(mkv_file)
+    return int(np.round((time_t - time_0).total_seconds() / 3600))
+
+
+def _get_activity_path(folder_path: str,
+                       mkv_file: str,
+                       time_0: Optional[datetime.datetime]) -> str:
+    """
+    Get the save path of the activity plot of a recording.
+
+    All activity plots are saved in ``<folder_path>/activity/``, named as the
+    recording folder (date_time) plus the hours APF (``<date_time>_XXhAPF.png``).
+    If `time_0` is None, the hAPF suffix is omitted.
+
+    Parameters
+    ----------
+    folder_path : str
+        Parent folder containing the recordings.
+    mkv_file : str
+        Path to the .mkv video file.
+    time_0 : datetime.datetime or None
+        Puparium formation time, see `_get_time_0()`.
+
+    Returns
+    -------
+    str
+        Path to the activity plot png.
+    """
+    rec_name = os.path.basename(os.path.dirname(mkv_file))
+    if time_0 is not None:
+        rec_name += f'_{_get_hours_apf(mkv_file, time_0)}hAPF'
+    return os.path.join(folder_path, ACT_FOLDER, rec_name + '.png')
 
 
 
-
-def _preprocess(mkv_file: str) -> None:
+def _preprocess(mkv_file: str,
+                act_path: str) -> None:
     """
     Process a single .mkv recording and write all output files to its folder.
 
     Reads every packed frame (4 real frames per container frame), builds the
     mp4 preview, computes per-pixel projections (max, min, median via
     `np.partition`, std), and saves them as PNG previews and an unclipped
-    HDF5 file. Also plots mean fluorescence over time.
+    HDF5 file. Also plots mean fluorescence over time and saves it to
+    `act_path`.
 
     Parameters
     ----------
     mkv_file : str
         Absolute path to the source .mkv video file.
+    act_path : str
+        Save path of the activity plot, see `_get_activity_path()`.
     """
     # get the directory of the mkv_file video (to save the outputs in the same folder)
     dir = os.path.dirname(mkv_file)
@@ -222,7 +339,8 @@ def _preprocess(mkv_file: str) -> None:
     plt.xlabel('Time (min)')
     plt.ylabel('Mean fluorescence')
     plt.title(os.path.basename(mkv_file))
-    plt.savefig(os.path.join(dir, ACT_SAVE_NAME), dpi=300)
+    os.makedirs(os.path.dirname(act_path), exist_ok=True)
+    plt.savefig(act_path, dpi=300)
     plt.close()
 
 
@@ -253,78 +371,85 @@ def _preprocess(mkv_file: str) -> None:
         f.create_dataset('std', data=std_frame)
 
 
-def _save_grid_image(folder_path: str, mkv_files: list[str]) -> None:
+def _save_grid_image(folder_path: str,
+                     mkv_files: list[str],
+                     time_0: datetime.datetime) -> None:
     """
-    Save a grid of max-projection images labelled with hours APF.
+    Save grids of max-projection images labelled with hours APF.
 
-    Extracts the puparium formation time from the last two underscore-delimited
-    tokens of `folder_path` (expected format ``MM-DD_HHhMM``). If the format
-    does not match, the function prints a warning and returns without saving.
-    The grid is arranged in 4 rows and saved to
-    ``<folder_path>/00_Figs/max_projection_grid.png``.
+    Each figure holds at most `GRID_MAX_ROWS` rows x `GRID_MAX_COLS` columns;
+    if there are more recordings, several figures are saved. The unclipped max
+    projections (from the h5 file) are all loaded first and shown with a shared
+    contrast: vmin is the min value across all of them and vmax is the median
+    of the per-image max values (robust to a few outlier bright pixels).
+    Figures are saved to ``<folder_path>/00_Figs/max_projection_grid.png``, or
+    ``max_projection_grid_1.png``, ``max_projection_grid_2.png``, ... if more
+    than one figure is needed.
 
     Parameters
     ----------
     folder_path : str
-        Parent folder whose name encodes the puparium formation time.
+        Parent folder containing the recordings.
     mkv_files : list of str
         Ordered list of .mkv paths, one per subplot.
+    time_0 : datetime.datetime
+        Puparium formation time, see `_get_time_0()`.
     """
-    # try to extract the puparium formation time from the folder name
-    # if not possible, skip the grid image generation
-    try:
-        time_0_str = '_'.join(folder_path.split('_')[-2:])
-        time_0 = datetime.datetime.strptime(time_0_str, '%m-%d_%Hh%M')
-    except ValueError:
-        print("Could not extract puparium formation time from folder name.")
-        print("  Will not generate grid image.")
-        return
-    
     print(f'Generating grid image for {len(mkv_files)} videos...')
 
-    # get the number of subplot columns needed (4 rows)
-    rows = 4
-    cols = int(np.ceil(len(mkv_files) / rows))
-
-    # plot grid of max projection image for each video
-    fig, axes = plt.subplots(rows, cols, figsize=(22, 12))
-    axes = axes.flatten()
-
-    for i, vid in enumerate(mkv_files):
-        if i >= len(axes):
-            break
-
-        # load the max projection image
-        dir = os.path.dirname(vid)
-        max_proj_path = os.path.join(dir, MAX_SAVE_NAME)
-        frame_0 = cv2.imread(max_proj_path, cv2.IMREAD_UNCHANGED)
+    # load all the unclipped max projection images
+    max_projs = []
+    for vid in mkv_files:
+        _, max_proj = utils.load_min_max_proj(vid)
 
         # if image is horizontal, rotate the image 90 degrees clockwise
-        if frame_0.shape[1] > frame_0.shape[0]:
-            frame_0 = np.rot90(frame_0, k=-1)
+        if max_proj.shape[1] > max_proj.shape[0]:
+            max_proj = np.rot90(max_proj, k=-1)
+        max_projs.append(max_proj)
 
-        # get the date/time of the video from the filename
-        time_t_str = os.path.basename(vid)[-24:-15]
-        time_t = datetime.datetime.strptime(time_t_str, '%m%d_%H%M')
-        # calculate hours since puparium formation
-        hours = np.round((time_t - time_0).total_seconds() / 3600).astype(int)
+    # get the contrast limits across all the max projections: vmin is the global
+    # min, vmax is the median of the per-image max (the global max is dominated
+    # by a few outlier pixels and makes most images look black)
+    vmin = min(int(m.min()) for m in max_projs)
+    vmax = float(np.median([m.max() for m in max_projs]))
 
-        # Plot the average frame
-        axes[i].imshow(frame_0, cmap='gray', vmin=50, vmax=500)
-        axes[i].axis('off')
-        axes[i].set_title(f'{time_t_str} - {hours}h APF', fontsize=10)
-
-    plt.tight_layout()
+    # get the grid layout (same for all figures) and split the videos into figures
+    rows = GRID_MAX_ROWS
+    cols = min(GRID_MAX_COLS, int(np.ceil(len(mkv_files) / rows)))
+    n_per_fig = rows * cols
+    fig_chunks = [range(i, min(i + n_per_fig, len(mkv_files)))
+                  for i in range(0, len(mkv_files), n_per_fig)]
 
     # create figs folder if it doesn't exist
-    if not os.path.exists(os.path.join(folder_path, FIGS_FOLDER)):
-        os.makedirs(os.path.join(folder_path, FIGS_FOLDER))
-    
-    # save
-    save_path = os.path.join(folder_path, FIGS_FOLDER, GRID_SAVE_NAME)
-    plt.savefig(save_path, dpi=300)
-    plt.close()
+    os.makedirs(os.path.join(folder_path, FIGS_FOLDER), exist_ok=True)
 
+    for k, chunk in enumerate(fig_chunks):
+
+        # plot grid of max projection image for each video
+        fig, axes = plt.subplots(rows, cols, figsize=(22, 12), squeeze=False)
+        axes = axes.flatten()
+        for ax in axes:
+            ax.axis('off')
+
+        for i, idx in enumerate(chunk):
+            vid = mkv_files[idx]
+
+            # get the date/time of the video and the hours since puparium formation
+            time_t_str, _ = _get_recording_time(vid)
+            hours = _get_hours_apf(vid, time_0)
+
+            # Plot the max projection
+            axes[i].imshow(max_projs[idx], cmap='gray', vmin=vmin, vmax=vmax)
+            axes[i].set_title(f'{time_t_str} - {hours}h APF', fontsize=10)
+
+        plt.tight_layout()
+
+        # save (add figure number to the name if there are several figures)
+        save_name = GRID_SAVE_NAME
+        if len(fig_chunks) > 1:
+            save_name = save_name.replace('.png', f'_{k + 1}.png')
+        plt.savefig(os.path.join(folder_path, FIGS_FOLDER, save_name), dpi=300)
+        plt.close(fig)
 
 
 if __name__ == "__main__":
