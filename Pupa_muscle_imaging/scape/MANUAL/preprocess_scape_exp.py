@@ -2,8 +2,11 @@
 Script to preprocess a scape experiment
 Takes as input the folder for a scape experiment.
 Expects the folder to contain subfolders called sample#_run#,
-some with _HR in the end which it ignores
-Lists all these folders, sorted by sample# then run#, each with an index, and asks
+some with _HR in the end (high-resolution single-volume recordings).
+First, every _HR folder that still has raw .dat files is converted (not deskewed) to a
+single nrrd file (sample#_run#_HR.nrrd, inside the _HR folder, via scapeio.convert),
+which is checked before the .dat files are deleted.
+Then lists all non-_HR folders, sorted by sample# then run#, each with an index, and asks
 which indices to keep (supports ranges, e.g. '2-5,7,9-12').
 Then, sample by sample, goes run by run and checks:
 - if the folder structure is correct (raw data inside a sub-subfolder)
@@ -16,8 +19,11 @@ Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder]`) or 
 and called as a function. If `exp_folder` is not given, a folder-selection dialog opens,
 starting in `scape_utils.MAIN_PATH`.
 
-preprocess_scape_exp: main function, lists and preprocesses all sample#_run# subfolders of
-    an experiment folder, then combines projections per sample.
+convert_HR_folders: convert all sample#_run#_HR subfolders of an experiment folder to a
+    single (not deskewed) nrrd each, then delete their raw .dat files.
+preprocess_scape_exp: main function, converts the HR folders (see convert_HR_folders), then
+    lists and preprocesses all other sample#_run# subfolders of an experiment folder, and
+    combines projections per sample.
 """
 
 import argparse
@@ -26,6 +32,8 @@ import re
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
+
+import scapeio
 
 import scape_utils
 
@@ -77,11 +85,94 @@ def _parse_index_ranges(indices_input: str) -> set[int]:
     return indices
 
 
+def _hr_scan_path(hr_path: Path) -> Path:
+    """
+    Get the folder scapeio should treat as the scan (the folder containing the
+    raw data, with a matching `_info.mat` file next to it) for a
+    `sample#_run#_HR` folder, which can be in either of two layouts:
+    - as acquired: raw data directly in `hr_path`, with `_info.mat` and
+      `_stim_data.bin` next to it in the experiment folder -> `hr_path`
+    - moved inside (as done by `scape_utils.check_folder_structure` for normal
+      runs): raw data in `hr_path / hr_path.name`, with `_info.mat` and
+      `_stim_data.bin` in `hr_path` -> `hr_path / hr_path.name`
+
+    Parameters
+    ----------
+    hr_path : Path
+        Path to a `sample#_run#_HR` folder.
+
+    Returns
+    -------
+    Path
+    """
+    nested_path = hr_path / hr_path.name
+    if nested_path.is_dir() and (hr_path / f'{hr_path.name}_info.mat').exists():
+        return nested_path
+    return hr_path
+
+
+def convert_HR_folders(exp_folder: str | Path) -> None:
+    """
+    Convert every high-resolution (single-volume) recording in an experiment
+    folder, i.e. every `sample#_run#_HR` subfolder, to a single nrrd file with
+    `scapeio.convert` (not deskewed), then delete its raw .dat files.
+
+    The nrrd is saved by scapeio inside the HR folder as `sample#_run#_HR.nrrd`
+    (with the raw voxel size in its header), so `scapeio.load_scan(hr_path, colors=1)`
+    loads it afterwards instead of the .dat files (and can then be deskewed with
+    `scapeio.operations.deskew_scan`). Before deleting the .dat files, the nrrd is
+    checked by loading it back and making sure it's a non-empty 3D volume, and by
+    `scapeio.delete_dat_files` checking it's big enough to hold the full scan.
+    HR folders with no .dat files left (already converted) are skipped. Works
+    whether or not the raw data were already moved inside the HR folder (see
+    `_hr_scan_path`); if so, the nrrd is saved next to the raw data, in
+    `sample#_run#_HR/sample#_run#_HR/`.
+
+    Parameters
+    ----------
+    exp_folder : str | Path
+        Path to the experiment folder containing the `sample#_run#_HR` subfolders.
+
+    Returns
+    -------
+    None
+    """
+    hr_paths = sorted((p for p in Path(exp_folder).iterdir()
+                       if p.is_dir() and p.name.startswith('sample') and p.name.endswith('_HR')),
+                      key=_sample_run_sort_key)
+    print(f'Found {len(hr_paths)} HR folders in {exp_folder}')
+
+    for hr_path in hr_paths:
+        hr_path = str(_hr_scan_path(hr_path)) # string needed for scapeio
+        if not scapeio.io.list_dat_files(hr_path):
+            print(f'No .dat files found in {hr_path}, skipping (already converted?)')
+            continue
+
+        nrrd_path = scapeio.io.get_data_copy_name(hr_path, copy_format='nrrd', colors=1,
+                                                  check_exists=True)
+        if nrrd_path is None:
+            print(f'Converting {hr_path} to nrrd...')
+            nrrd_path = scapeio.convert(hr_path, output_format='nrrd', colors=1)
+        else:
+            print(f'nrrd already found for {hr_path}, checking it...')
+
+        # check the nrrd loads back fine before deleting the raw data
+        volume = scapeio.load_scan(hr_path, colors=1, try_loading_copies=['nrrd'])
+        if volume.ndim != 3 or volume.size == 0 or not volume.any():
+            raise RuntimeError(f'{nrrd_path} loaded back as an empty or non-3D volume '
+                               f'(shape {volume.shape}). Raw .dat files were NOT deleted.')
+        print(f'Checked {nrrd_path} (shape {volume.shape}, {volume.dtype}).')
+        del volume
+
+        scapeio.delete_dat_files(hr_path, verify_copy_exists='nrrd', fake=False)
+
+
 def preprocess_scape_exp(exp_folder: str | Path | None = None) -> None:
     """
     Preprocess all SCAPE recordings in an experiment folder.
 
-    Lists all `sample#_run#` subfolders (ignoring any ending in `_HR`), sorted
+    First converts all `sample#_run#_HR` subfolders to (not deskewed) nrrd and
+    deletes their raw .dat files (see `convert_HR_folders`). Then lists all `sample#_run#` subfolders (ignoring any ending in `_HR`), sorted
     by sample# then run#, each with an index, and asks which indices to keep
     (supports ranges, e.g. `'2-5,7,9-12'`). Then, sample by sample, for each
     remaining run checks (and if needed fixes/computes) the folder structure
@@ -138,6 +229,8 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None) -> None:
     if keep_input.strip():
         keep_indices = _parse_index_ranges(keep_input)
         scape_paths = [p for index, p in enumerate(scape_paths, start=1) if index in keep_indices]
+
+    convert_HR_folders(exp_folder)
 
     sample_run_paths: dict[str, list[Path]] = {}
     for scape_path in scape_paths:
