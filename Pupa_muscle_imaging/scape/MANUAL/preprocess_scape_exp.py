@@ -7,25 +7,30 @@ First, the folder structure of every _HR folder is fixed like for normal runs (s
 scape_utils.check_folder_structure), and every _HR folder that still has raw .dat files is
 converted (not deskewed) to a single nrrd file (sample#_run#_HR/sample#_run#_HR/
 sample#_run#_HR.nrrd, via scapeio.convert), which is checked before the .dat files are
-deleted.
+deleted. Each HR nrrd is also deskewed and saved as a calibrated OME-TIFF next to it
+(sample#_run#_HR_deskewed.ome.tif), if not already there.
 Then lists all non-_HR folders, sorted by sample# then run#, each with an index, and asks
 which indices to keep (supports ranges, e.g. '2-5,7,9-12').
 Then, sample by sample, goes run by run and checks:
 - if the folder structure is correct (raw data inside a sub-subfolder)
 - if the max/min/std projections have been calculated already
 If either of these have not been done, it does it.
-Once all runs for a sample are done, it creates a new folder called sample#_combined
-and combines all the projections for that sample, before moving on to the next sample.
+Once all runs for a sample are done, if the sample has more than one (kept) run, it
+creates a new folder called sample#_combined and combines all the projections for that
+sample, before moving on to the next sample. Samples with a single run get no
+sample#_combined folder (use the sample#_run# folder directly).
 
 Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder]`) or imported
 and called as a function. If `exp_folder` is not given, a folder-selection dialog opens,
 starting in `scape_utils.MAIN_PATH`.
 
+save_HR_deskewed_tif: deskew a converted HR nrrd and save it as a calibrated OME-TIFF.
 convert_HR_folders: convert all sample#_run#_HR subfolders of an experiment folder to a
-    single (not deskewed) nrrd each, then delete their raw .dat files.
+    single (not deskewed) nrrd each, delete their raw .dat files, and save a deskewed
+    OME-TIFF of each (see save_HR_deskewed_tif).
 preprocess_scape_exp: main function, converts the HR folders (see convert_HR_folders), then
     lists and preprocesses all other sample#_run# subfolders of an experiment folder, and
-    combines projections per sample.
+    combines projections per sample (for samples with more than one run).
 """
 
 import argparse
@@ -35,7 +40,9 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
 
+import numpy as np
 import scapeio
+import tifffile
 
 import scape_utils
 
@@ -87,6 +94,59 @@ def _parse_index_ranges(indices_input: str) -> set[int]:
     return indices
 
 
+def save_HR_deskewed_tif(hr_path: str | Path) -> Path:
+    """
+    Deskew a high-resolution (single-volume) recording that was already
+    converted to nrrd (see `convert_HR_folders`) and save it as a calibrated
+    OME-TIFF next to the nrrd, as
+    `sample#_run#_HR/sample#_run#_HR/sample#_run#_HR_deskewed.ome.tif`.
+
+    Uses the same axis order and metadata as the projection OME-TIFFs (see
+    `scape_utils.get_projection_images`): the deskewed volume (depth, galvo
+    scan axis, camera image width) is transposed to ZYX, with the deskewed
+    voxel size from `scape_utils.load_voxel_size` embedded, so it opens
+    correctly scaled in napari. The saved file is checked by reading it back.
+    Skipped if the tif already exists.
+
+    Parameters
+    ----------
+    hr_path : str | Path
+        Path to a `sample#_run#_HR` folder (with its folder structure already
+        fixed by `scape_utils.check_folder_structure`).
+
+    Returns
+    -------
+    Path
+        Path to the deskewed OME-TIFF.
+    """
+    hr_path = Path(hr_path)
+    raw_path = hr_path / hr_path.name
+    tiff_path = raw_path / f'{hr_path.name}_deskewed.ome.tif'
+    if tiff_path.exists():
+        print(f'Deskewed tif already found for {hr_path.name}, skipping.')
+        return tiff_path
+
+    print(f'Deskewing {hr_path.name} and saving it as a tif...')
+    raw_volume = scapeio.load_scan(str(raw_path), colors=1, try_loading_copies=['nrrd'])
+    deskewed = scapeio.operations.deskew_scan(str(raw_path), images=raw_volume)
+    del raw_volume
+    if np.issubdtype(deskewed.dtype, np.floating):
+        deskewed = np.clip(np.rint(deskewed), 0, np.iinfo(np.uint16).max).astype(np.uint16)
+    deskewed = deskewed.transpose(0, 2, 1)
+
+    voxel_size = scape_utils.load_voxel_size(hr_path)
+    tiff_metadata = {'axes': 'ZYX',
+                     'PhysicalSizeX': voxel_size['x'], 'PhysicalSizeXUnit': 'um',
+                     'PhysicalSizeY': voxel_size['y'], 'PhysicalSizeYUnit': 'um',
+                     'PhysicalSizeZ': voxel_size['z'], 'PhysicalSizeZUnit': 'um'}
+    tifffile.imwrite(tiff_path, deskewed, ome=True, metadata=tiff_metadata)
+
+    if not np.array_equal(tifffile.imread(tiff_path), deskewed):
+        raise RuntimeError(f'{tiff_path} did not read back identical to the deskewed volume.')
+    print(f'Saved {tiff_path} (shape {deskewed.shape}, {deskewed.dtype}).')
+    return tiff_path
+
+
 def convert_HR_folders(exp_folder: str | Path) -> None:
     """
     Convert every high-resolution (single-volume) recording in an experiment
@@ -104,7 +164,9 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
     `scapeio.operations.deskew_scan`). Before deleting the .dat files, the nrrd is
     checked by loading it back and making sure it's a non-empty 3D volume, and by
     `scapeio.delete_dat_files` checking it's big enough to hold the full scan.
-    HR folders with no .dat files left (already converted) are skipped.
+    HR folders with no .dat files left (already converted) skip the conversion.
+    Finally, every HR folder with an nrrd gets a deskewed OME-TIFF (see
+    `save_HR_deskewed_tif`), also those converted in earlier runs.
 
     Parameters
     ----------
@@ -122,42 +184,49 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
 
     for hr_path in hr_paths:
         scape_utils.check_folder_structure(hr_path)
-        hr_path = str(hr_path / hr_path.name) # raw data folder, string needed for scapeio
-        if not scapeio.io.list_dat_files(hr_path):
-            print(f'No .dat files found in {hr_path}, skipping (already converted?)')
-            continue
-
-        nrrd_path = scapeio.io.get_data_copy_name(hr_path, copy_format='nrrd', colors=1,
-                                                  check_exists=True)
-        if nrrd_path is None:
-            print(f'Converting {hr_path} to nrrd...')
-            nrrd_path = scapeio.convert(hr_path, output_format='nrrd', colors=1)
+        raw_path = str(hr_path / hr_path.name) # raw data folder, string needed for scapeio
+        if not scapeio.io.list_dat_files(raw_path):
+            print(f'No .dat files found in {raw_path}, skipping conversion (already converted?)')
         else:
-            print(f'nrrd already found for {hr_path}, checking it...')
+            nrrd_path = scapeio.io.get_data_copy_name(raw_path, copy_format='nrrd', colors=1,
+                                                      check_exists=True)
+            if nrrd_path is None:
+                print(f'Converting {raw_path} to nrrd...')
+                nrrd_path = scapeio.convert(raw_path, output_format='nrrd', colors=1)
+            else:
+                print(f'nrrd already found for {raw_path}, checking it...')
 
-        # check the nrrd loads back fine before deleting the raw data
-        volume = scapeio.load_scan(hr_path, colors=1, try_loading_copies=['nrrd'])
-        if volume.ndim != 3 or volume.size == 0 or not volume.any():
-            raise RuntimeError(f'{nrrd_path} loaded back as an empty or non-3D volume '
-                               f'(shape {volume.shape}). Raw .dat files were NOT deleted.')
-        print(f'Checked {nrrd_path} (shape {volume.shape}, {volume.dtype}).')
-        del volume
+            # check the nrrd loads back fine before deleting the raw data
+            volume = scapeio.load_scan(raw_path, colors=1, try_loading_copies=['nrrd'])
+            if volume.ndim != 3 or volume.size == 0 or not volume.any():
+                raise RuntimeError(f'{nrrd_path} loaded back as an empty or non-3D volume '
+                                   f'(shape {volume.shape}). Raw .dat files were NOT deleted.')
+            print(f'Checked {nrrd_path} (shape {volume.shape}, {volume.dtype}).')
+            del volume
 
-        scapeio.delete_dat_files(hr_path, verify_copy_exists='nrrd', fake=False)
+            scapeio.delete_dat_files(raw_path, verify_copy_exists='nrrd', fake=False)
+
+        if scapeio.io.get_data_copy_name(raw_path, copy_format='nrrd', colors=1,
+                                         check_exists=True) is None:
+            print(f'No nrrd found for {raw_path}, skipping deskewed tif.')
+            continue
+        save_HR_deskewed_tif(hr_path)
 
 
 def preprocess_scape_exp(exp_folder: str | Path | None = None) -> None:
     """
     Preprocess all SCAPE recordings in an experiment folder.
 
-    First converts all `sample#_run#_HR` subfolders to (not deskewed) nrrd and
-    deletes their raw .dat files (see `convert_HR_folders`). Then lists all `sample#_run#` subfolders (ignoring any ending in `_HR`), sorted
+    First converts all `sample#_run#_HR` subfolders to (not deskewed) nrrd,
+    deletes their raw .dat files and saves a deskewed OME-TIFF of each (see
+    `convert_HR_folders`). Then lists all `sample#_run#` subfolders (ignoring any ending in `_HR`), sorted
     by sample# then run#, each with an index, and asks which indices to keep
     (supports ranges, e.g. `'2-5,7,9-12'`). Then, sample by sample, for each
     remaining run checks (and if needed fixes/computes) the folder structure
     and projection images via `scape_utils`, and once all of a sample's runs
     are done, combines their projections into a new `sample#_combined` folder
-    before moving on to the next sample.
+    before moving on to the next sample. Samples with a single (kept) run get
+    no `sample#_combined` folder.
 
     Parameters
     ----------
@@ -226,7 +295,10 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None) -> None:
                 print(f'Projections not found for {scape_path.name}. Computing them...')
                 scape_utils.get_projection_images(scape_path)
 
-        scape_utils.combine_sample_projections(exp_folder, sample_name, run_paths)
+        if len(run_paths) > 1:
+            scape_utils.combine_sample_projections(exp_folder, sample_name, run_paths)
+        else:
+            print(f'Only one run for {sample_name}, not creating a {sample_name}_combined folder.')
 
 
 if __name__ == '__main__':
