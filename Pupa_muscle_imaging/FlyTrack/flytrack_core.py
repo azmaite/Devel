@@ -9,7 +9,10 @@ per-recording processing (decode a video -> save ``projection_images.h5``
 ``std.png`` preview images, a half-resolution/compressed ``summary_video.mp4``
 preview, and, when motion-correcting, ``drift.png`` and a
 ``summary_video_motioncorrected.mp4``), and the interactive terminal selection
-helpers. These are imported by both
+helpers. Also holds `tif2mkv()`, which converts a folder of raw FlyTrack tifs
+(numbered RGBA tifs plus per-tif metadata csvs) into the ``_raw_tiff.mkv`` and
+``_tif_metadata.h5`` pair used here, for recordings that were never exported.
+The other helpers are imported by both
 `preprocess_flytrack.py` (builds the grouped projections across recordings) and
 `motion_correct_flytrack.py` (removes within-recording rigid drift), so neither
 script depends on the other and either can be run first.
@@ -25,8 +28,13 @@ template, and the video is decoded a second time to align every frame to it
 """
 
 import os
+import re
+import csv
 import sys
+import shutil
+import subprocess
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import av
@@ -100,6 +108,15 @@ DOWNSAMPLE = 2
 # (half resolution in each direction), and mapped to 8-bit by clipping
 # intensities to SUMMARY_CLIP. It plays back at the recording's real frame rate.
 SUMMARY_CLIP = 600
+
+# raw tif -> .mkv conversion (`tif2mkv()`): FlyTrack saves each recording as
+# numbered RGBA tifs (4 real frames per tif) plus a `<n>_metadata.csv` per tif.
+# These are packed into a lossless ffv1 .mkv at 1/TIF_DURATION container fps,
+# matching flymuscle-control's export/export_exp_as_mkv.py.
+TIF_DURATION = 0.04
+FIXED_TIF_DIR = 'fixed_tif'                  # temporary, inside the tif folder
+TIF_LIST_NAME = 'list_tif.txt'               # temporary ffmpeg concat list
+FFMPEG_LOG_NAME = 'ffmpeg_tif_export.log'    # kept only if ffmpeg fails
 
 
 def _select_mkv_paths(input_folder: str) -> list[str]:
@@ -856,3 +873,229 @@ def _read_existing_metadata(mkv_file: str) -> tuple[list[int], int, float]:
     _, fps = utils.load_timestamps(mkv_file)
 
     return [int(width), int(height)], num_frames, float(fps)
+
+
+def tif2mkv(tif_folder: str,
+            overwrite: bool = False,
+            delete_tifs: bool = False) -> str:
+    """
+    Convert a folder of raw FlyTrack tifs into a `_raw_tiff.mkv` and its metadata.
+
+    Adapted from `export_tifs_as_mkv()` and `store_frame_metadata()` in
+    flymuscle-control's ``export/export_exp_as_mkv.py``, but without moving the
+    outputs to another folder (and deleting the raw tifs only on request, see
+    `delete_tifs`). Use it for recordings
+    whose tifs were never exported to .mkv, so the .mkv pipeline can pick them up.
+
+    `tif_folder` must hold numbered RGBA tifs (``0.tif``, ``4.tif``, ...; each
+    holds 4 real 16-bit frames, one per channel) and a ``<n>_metadata.csv`` per
+    tif (one row per real frame: frame_id, timestamp in us, is_kinematic, and
+    optionally stage_position). Each tif is first re-saved through `cv2` into a
+    temporary `FIXED_TIF_DIR` subfolder (as in the original script) and these
+    are then encoded losslessly by ``ffmpeg`` (ffv1, 16-bit RGBA). Two files are
+    written to `tif_folder`, named ``<exp_name>_raw_tiff.mkv`` and
+    ``<exp_name>_tif_metadata.h5``, where `exp_name` joins the last three folder
+    names of `tif_folder` with underscores (e.g. ``<experiment>_Fly_001_001``).
+    The temporary subfolder and concat list are removed afterwards; the ffmpeg
+    log is kept only if encoding fails.
+
+    If `delete_tifs` is True, the numbered tifs and their ``_metadata.csv``
+    files are deleted once the conversion is verified: the .mkv must hold one
+    container frame per tif and the h5 must hold 4 metadata rows per tif.
+    Otherwise nothing is deleted and a warning is printed.
+
+    Parameters
+    ----------
+    tif_folder : str
+        Recording folder holding the numbered tifs and metadata csvs.
+    overwrite : bool, optional
+        If False (default) and the .mkv already exists, skip the conversion.
+    delete_tifs : bool, optional
+        If True, delete the raw tifs and metadata csvs after a verified
+        conversion. Default False. Not applied when the conversion is skipped.
+
+    Returns
+    -------
+    str
+        Path to the `.mkv` file.
+    """
+
+    tif_folder = Path(tif_folder)
+    exp_name = '_'.join(tif_folder.resolve().parts[-3:])
+    mkv_path = tif_folder / f'{exp_name}_raw_tiff.mkv'
+    h5_path = tif_folder / f'{exp_name}_tif_metadata.h5'
+
+    if mkv_path.exists() and not overwrite:
+        print(f'{mkv_path.name} already exists, skip.')
+        return str(mkv_path)
+
+    tif_files = sorted(tif_folder.glob('[0-9]*.tif'), key=lambda x: int(x.stem))
+    assert len(tif_files) > 0, f'No numbered .tif files found in {tif_folder}'
+
+    # re-save every tif through cv2 so ffmpeg can read them
+    fixed_tif_folder = tif_folder / FIXED_TIF_DIR
+    fixed_tif_folder.mkdir(exist_ok=True)
+    with ThreadPoolExecutor() as executor:
+        results = list(tqdm.tqdm(
+            executor.map(_resave_tif, tif_files, [fixed_tif_folder] * len(tif_files)),
+            total=len(tif_files), desc='Re-saving tifs'))
+    failed = [r for r in results if r is not None]
+    if failed:
+        shutil.rmtree(fixed_tif_folder, ignore_errors=True)
+        raise RuntimeError(f'{len(failed)} tifs could not be re-saved, e.g. {failed[0]}')
+
+    # write the ffmpeg concat list (one entry per tif, each shown for TIF_DURATION s)
+    list_path = tif_folder / TIF_LIST_NAME
+    with open(list_path, 'w') as f:
+        for tif_file in tif_files:
+            f.write(f"file '{fixed_tif_folder / tif_file.name}'\n")
+            f.write(f'duration {TIF_DURATION}\n')
+
+    ffmpeg_command = [
+        'ffmpeg',
+        '-hwaccel', 'none',
+        '-y',                    # overwrite output file if it exists
+        '-f', 'concat',
+        '-safe', '0',            # allow absolute paths
+        '-i', str(list_path),
+        '-c:v', 'ffv1',          # lossless codec
+        '-pix_fmt', 'rgba64le',
+        '-an',
+        str(mkv_path),
+    ]
+    log_path = tif_folder / FFMPEG_LOG_NAME
+    returncode = _run_ffmpeg_with_log(ffmpeg_command, log_path, len(tif_files))
+
+    list_path.unlink()
+    shutil.rmtree(fixed_tif_folder, ignore_errors=True)
+    if returncode != 0:
+        raise RuntimeError(f'ffmpeg failed (code {returncode}), see {log_path}')
+    log_path.unlink()
+
+    # gather the per-tif metadata csvs into a single h5
+    n_meta = _store_tif_metadata(tif_files, h5_path)
+    if len(tif_files) * 4 != n_meta:
+        print(f'Warning: {len(tif_files)} tif files found, but {n_meta} metadata entries')
+
+    print(f'Saved {mkv_path}')
+
+    # delete the raw tifs and csvs, only if the .mkv and metadata are complete
+    if delete_tifs:
+        with av.open(str(mkv_path)) as container:
+            n_mkv = sum(1 for packet in container.demux(video=0) if packet.size > 0)
+        if n_mkv != len(tif_files) or n_meta != len(tif_files) * 4:
+            print(f'Warning: {n_mkv} mkv frames and {n_meta} metadata entries for '
+                  f'{len(tif_files)} tifs, NOT deleting the raw tifs.')
+        else:
+            for tif_file in tqdm.tqdm(tif_files, desc='Deleting tifs'):
+                tif_file.with_name(tif_file.stem + '_metadata.csv').unlink(missing_ok=True)
+                tif_file.unlink()
+            print(f'Deleted {len(tif_files)} raw tifs and their metadata csvs')
+
+    return str(mkv_path)
+
+
+def _resave_tif(path: Path,
+                output_dir: Path) -> str | None:
+    """
+    Re-save one RGBA tif into `output_dir` with `cv2`, for `tif2mkv()`.
+
+    Parameters
+    ----------
+    path : Path
+        Source tif.
+    output_dir : Path
+        Folder to write the re-saved tif to (same file name).
+
+    Returns
+    -------
+    str or None
+        None on success, otherwise a message describing the failure.
+    """
+
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return f'Failed to read {path.name}'
+    if img.ndim != 3 or img.shape[2] != 4:
+        return f'Unexpected shape {img.shape} in {path.name}'
+    if not cv2.imwrite(str(output_dir / path.name), img):
+        return f'Failed to write {path.name}'
+    return None
+
+
+def _run_ffmpeg_with_log(ffmpeg_command: list[str],
+                         log_path: Path,
+                         n_frames: int) -> int:
+    """
+    Run ``ffmpeg``, logging its stderr to `log_path` and showing a progress bar.
+
+    Parameters
+    ----------
+    ffmpeg_command : list of str
+        Full ffmpeg command.
+    log_path : Path
+        File to write ffmpeg's stderr to (overwritten).
+    n_frames : int
+        Expected number of output (container) frames, for the progress bar.
+
+    Returns
+    -------
+    int
+        ffmpeg's return code.
+    """
+
+    with open(log_path, 'w') as log, subprocess.Popen(
+            ffmpeg_command, start_new_session=True, stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, text=True, bufsize=1) as process:
+        progress_bar = tqdm.tqdm(total=n_frames, unit='frame', desc='Encoding mkv')
+        for line in process.stderr:
+            log.write(line)
+            match = re.search(r'frame=\s*(\d+)', line)
+            if match:
+                progress_bar.update(int(match.group(1)) - progress_bar.n)
+        progress_bar.close()
+        process.wait()
+    return process.returncode
+
+
+def _store_tif_metadata(tif_files: list[Path],
+                        h5_path: Path) -> int:
+    """
+    Merge the per-tif ``<n>_metadata.csv`` files into one h5, for `tif2mkv()`.
+
+    Each csv row is one real frame (frame_id, timestamp, is_kinematic, and
+    optionally stage_position). Values are stored as strings, as in
+    flymuscle-control, which `utils.load_timestamps()` expects.
+
+    Parameters
+    ----------
+    tif_files : list of Path
+        Tif paths, in recording order.
+    h5_path : Path
+        Output ``_tif_metadata.h5`` path.
+
+    Returns
+    -------
+    int
+        Number of metadata rows (real frames) written.
+    """
+
+    frame_ids, timestamps, is_kinematic, stage_positions = [], [], [], []
+    for tif_file in tif_files:
+        csv_path = tif_file.with_name(tif_file.stem + '_metadata.csv')
+        assert csv_path.exists(), f'Metadata file {csv_path} does not exist'
+        with open(csv_path) as f:
+            for row in csv.reader(f, delimiter=','):
+                frame_ids.append(row[0])
+                timestamps.append(row[1])
+                is_kinematic.append(row[2])
+                if len(row) > 3:
+                    stage_positions.append(row[3])
+
+    with h5py.File(h5_path, 'w') as f:
+        f.create_dataset('frame_ids', data=frame_ids)
+        f.create_dataset('timestamps', data=timestamps)
+        f.create_dataset('is_kinematic', data=is_kinematic)
+        if stage_positions:
+            f.create_dataset('stage_positions', data=stage_positions)
+    return len(frame_ids)
