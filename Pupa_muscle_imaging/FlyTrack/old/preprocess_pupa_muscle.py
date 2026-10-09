@@ -13,8 +13,10 @@ and a matching .h5 timestamp file. For each recording the script produces:
 - max_min_proj.h5        : unclipped max, min, median, and std projections
 
 The mean fluorescence over time (activity) plots of all recordings are saved
-together in ``<folder_path>/activity/``, named after the recording folder plus
-the hours after puparium formation (APF), e.g. ``<date_time>_XXhAPF.png``. If
+together in ``<folder_path>/activity/``, named after the path from `folder_path`
+to the recording folder (subfolder names joined with ``_``, e.g.
+``Fly1_001`` for ``<folder_path>/Fly1/001/``) plus the hours after puparium
+formation (APF), e.g. ``Fly1_001_XXhAPF.png``. If
 the parent folder name does not encode the puparium-formation time (format
 ``MM-DD_HHhMM``), the hAPF suffix is omitted.
 
@@ -208,8 +210,12 @@ def _get_activity_path(folder_path: str,
     Get the save path of the activity plot of a recording.
 
     All activity plots are saved in ``<folder_path>/activity/``, named as the
-    recording folder (date_time) plus the hours APF (``<date_time>_XXhAPF.png``).
-    If `time_0` is None, the hAPF suffix is omitted.
+    path from `folder_path` to the recording folder, with the subfolder names
+    joined by ``_`` (e.g. ``Fly1_001`` for ``<folder_path>/Fly1/001/``), so
+    recordings in identically named subfolders do not overwrite each other.
+    The hours APF are appended (``Fly1_001_XXhAPF.png``); if `time_0` is None,
+    the hAPF suffix is omitted. If the .mkv sits directly in `folder_path`, the
+    name of `folder_path` itself is used.
 
     Parameters
     ----------
@@ -225,7 +231,9 @@ def _get_activity_path(folder_path: str,
     str
         Path to the activity plot png.
     """
-    rec_name = os.path.basename(os.path.dirname(mkv_file))
+    rec_dir = Path(mkv_file).parent.resolve()
+    rel_parts = rec_dir.relative_to(Path(folder_path).resolve()).parts
+    rec_name = '_'.join(rel_parts) if rel_parts else rec_dir.name
     if time_0 is not None:
         rec_name += f'_{_get_hours_apf(mkv_file, time_0)}hAPF'
     return os.path.join(folder_path, ACT_FOLDER, rec_name + '.png')
