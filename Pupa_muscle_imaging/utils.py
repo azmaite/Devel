@@ -29,6 +29,9 @@ Utility functions for NMF muscle roi detection. Includes functions for:
     min_proj, max_proj = load_min_max_proj(mkv_file)
     median_frame = load_median_frame(mkv_file)
     frames_flat, median_flat, (frames_square) = load_mkv_roi(mkv_file, roi_names, masks, bounding_boxes=None)
+
+- file dialogs
+    sort_dialog_descending(tk_root)
 """
 
 from __future__ import annotations
@@ -379,6 +382,39 @@ def plot_spatial_components(H: np.ndarray,
         axes[j].axis('off')
     plt.show()
 
+
+
+### FILE DIALOG FUNCTIONS ###
+
+def sort_dialog_descending(tk_root: Any) -> None:
+    """
+    Make Tk file dialogs list folders and files in descending (Z-A) order.
+
+    Our recording folders start with a date (``YYYYMMDD_...``), so this shows
+    the newest ones first. Tk's built-in Linux dialog (used by
+    `tkinter.filedialog.askdirectory()` and `askopenfilename()`) has no sort
+    option, so this wraps its internal listing proc
+    ``::tk::dialog::file::GlobFiltered`` to reverse the list it returns. Call it
+    once on the Tk root, before opening the dialog; calling it again does nothing.
+
+    Parameters
+    ----------
+    tk_root : tkinter.Tk
+        The Tk root window the dialog will be opened from.
+
+    Returns
+    -------
+    None
+    """
+    tk_root.tk.eval('''
+        if {[info commands ::tk::dialog::file::GlobFilteredAscending] eq ""} {
+            auto_load ::tk::dialog::file::
+            rename ::tk::dialog::file::GlobFiltered ::tk::dialog::file::GlobFilteredAscending
+            proc ::tk::dialog::file::GlobFiltered {args} {
+                lreverse [uplevel 1 [list ::tk::dialog::file::GlobFilteredAscending {*}$args]]
+            }
+        }
+    ''')
 
 
 ### LOADING DATA FUNCTIONS ###
