@@ -6,7 +6,8 @@ Operates on a folder containing one or more subfolders, each holding a single
 16-bit .mkv video (4 real frames packed per container frame, recorded at 40 Hz)
 and a matching .h5 timestamp file. For each recording the script produces:
 
-- summary_video.mp4      : 8-bit compressed preview video
+- summary_video.mp4      : 8-bit compressed preview video, at the acquisition
+                           frame rate read from ``config_concatenated.yaml``
 - max_projection.png     : pixel-wise maximum across all frames
 - min_projection.png     : pixel-wise minimum across all frames
 - median.png             : per-pixel median frame (preview, clipped)
@@ -35,6 +36,7 @@ Example usages from the terminal:
 """
 
 import os
+import yaml
 import numpy as np
 import av
 import cv2
@@ -56,6 +58,7 @@ MAIN_PATH = '/mnt/labserver/data/MA/Development_project/Pupa_muscle_long_recordi
 
 # set the saving names
 MP4_SAVE_NAME = 'summary_video.mp4'
+CONFIG_NAME = 'config_concatenated.yaml'  # acquisition config, next to each .mkv
 ACT_FOLDER = 'activity'
 MIN_SAVE_NAME = 'min_projection.png'
 MAX_SAVE_NAME = 'max_projection.png'
@@ -90,6 +93,7 @@ def preprocess_pupa_muscle(folder_path: str = '') -> None:
         from tkinter import filedialog
         root = tk.Tk()
         root.withdraw()
+        utils.sort_dialog_descending(root)  # newest (YYYYMMDD_...) folders first
         folder_path = filedialog.askdirectory(initialdir=MAIN_PATH, title='Select folder containing recordings')
 
     # check that the path is valid
@@ -239,6 +243,38 @@ def _get_activity_path(folder_path: str,
     return os.path.join(folder_path, ACT_FOLDER, rec_name + '.png')
 
 
+def _get_framerate(mkv_file: str,
+                   fallback: float) -> float:
+    """
+    Get the acquisition frame rate (real frames per second) of a recording.
+
+    Read from ``arduino: framerate`` in the ``config_concatenated.yaml`` saved
+    next to the .mkv file (a concatenation of several yaml documents, of which
+    the main config is the one holding the ``arduino`` section). If the config
+    is missing or has no frame rate, `fallback` is used instead.
+
+    Parameters
+    ----------
+    mkv_file : str
+        Path to the .mkv video file.
+    fallback : float
+        Frame rate to use if it can't be read from the config, e.g. the one
+        estimated from the timestamps by `utils.load_timestamps()`.
+
+    Returns
+    -------
+    float
+        Frame rate in Hz.
+    """
+    config_path = os.path.join(os.path.dirname(mkv_file), CONFIG_NAME)
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for doc in yaml.safe_load_all(f):
+                if isinstance(doc, dict) and 'framerate' in doc.get('arduino', {}):
+                    return float(doc['arduino']['framerate'])
+    print(f'  No frame rate found in {CONFIG_NAME}, using {fallback:.1f} Hz from the timestamps.')
+    return fallback
+
 
 def _preprocess(mkv_file: str,
                 act_path: str) -> None:
@@ -246,7 +282,7 @@ def _preprocess(mkv_file: str,
     Process a single .mkv recording and write all output files to its folder.
 
     Reads every packed frame (4 real frames per container frame), builds the
-    mp4 preview, computes per-pixel projections (max, min, median via
+    mp4 preview (at the acquisition frame rate, see `_get_framerate()`), computes per-pixel projections (max, min, median via
     `np.partition`, std), and saves them as PNG previews and an unclipped
     HDF5 file. Also plots mean fluorescence over time and saves it to
     `act_path`.
@@ -289,7 +325,7 @@ def _preprocess(mkv_file: str,
     # Define the codec and create VideoWriter object for the mp4 video
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     mp4_path = os.path.join(dir, MP4_SAVE_NAME)
-    frame_rate = 20
+    frame_rate = _get_framerate(mkv_file, fallback=frame_rate)
     mp4 = cv2.VideoWriter(mp4_path, fourcc, frame_rate, frame_0.shape[::-1])
 
     # iterate through all the frames
