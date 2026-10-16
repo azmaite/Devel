@@ -358,8 +358,8 @@ def dat_to_mp4(chunk_path: str,
     memory-mapped and streamed straight to the writer, so the whole chunk is
     never held in memory at once. Since raw frames are 16-bit but mp4 only
     supports 8-bit, each frame is linearly rescaled from `[0, clip]` to
-    `[0, 255]` (clipping brighter pixels), following the same fixed-clip
-    convention as `SUMMARY_CLIP` in `flytrack_core.py`.
+    `[0, 255]` (clipping brighter pixels). (The .mkv summary video in
+    `flytrack_core.py` instead uses a contrast estimated from sampled frames.)
 
     The output path is picked from `chunk_path`'s location: if `chunk_path`
     sits directly inside a `raw_data` folder (as left by

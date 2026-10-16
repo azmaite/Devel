@@ -1,36 +1,44 @@
 #!/usr/bin/env python3
 """
-Shared helpers for the FlyTrack .mkv preprocessing and motion-correction scripts.
+Shared helpers for the FlyTrack .mkv preprocessing (`preprocess_flytrack.py`).
 
 Holds the constants, the single-video decode/projection routine, the
-per-recording processing (decode a video -> save ``projection_images.h5``
-(including a whole-video ``std`` image computed from the cumulative mean/mean_sq),
-``metadata.txt``, ``activity.png``, ``median.png``, ``max_proj.png`` and
-``std.png`` preview images, a half-resolution/compressed ``summary_video.mp4``
-preview, and, when motion-correcting, ``drift.png`` and a
-``summary_video_motioncorrected.mp4``), and the interactive terminal selection
-helpers. Also holds `tif2mkv()`, which converts a folder of raw FlyTrack tifs
-(numbered RGBA tifs plus per-tif metadata csvs) into the ``_raw_tiff.mkv`` and
-``_tif_metadata.h5`` pair used here, for recordings that were never exported.
-The other helpers are imported by both
-`preprocess_flytrack.py` (builds the grouped projections across recordings) and
-`motion_correct_flytrack.py` (removes within-recording rigid drift), so neither
-script depends on the other and either can be run first.
+per-recording processing (`_process_mkv()`: decode a video -> save
+``projection_images.h5`` (median, min/max projections, cumulative mean/mean_sq,
+whole-video ``std`` and per-frame mean fluorescence ``act``), ``metadata.txt``,
+the activity plot, the ``median.png``, ``max_proj.png``, ``min_proj.png`` and
+``std.png`` preview images, and a half-resolution/compressed
+``summary_video.mp4`` preview), and the interactive selection parser. Also holds
+`tif2mkv()`, which converts a folder of raw FlyTrack tifs (numbered RGBA tifs
+plus per-tif metadata csvs) into the ``_raw_tiff.mkv`` and ``_tif_metadata.h5``
+pair used here, for recordings that were never exported.
 
-Optional within-recording rigid-translation drift correction (used only by
-`motion_correct_flytrack.py`, via `_process_mkv(..., motion_correct=True)`):
+Preview contrast: every preview PNG is auto-contrasted on its own between its
+0.2th and 99.8th percentiles. The summary video uses one fixed contrast for the
+whole video, the 0.2th-99.8th percentiles of ~`VIDEO_CONTRAST_SAMPLES` evenly
+spaced frames read by seeking before the main decode (`_video_contrast()`), and
+plays back at the acquisition frame rate read from ``config_concatenated.yaml``
+(`_get_framerate()`).
+
+Optional within-recording rigid-translation drift correction
+(`_process_mkv(..., motion_correct=True)`, run by ``preprocess_flytrack.py -m``):
 drift is estimated by phase correlation on spatially high-pass-filtered frames
 so the changing GCaMP brightness does not drive the alignment. The video is
-decoded once to build a blurred median, that median is sharpened into a
-template, and the video is decoded a second time to align every frame to it
-(roughly doubling the decode time). The per-frame drift is saved to
-``projection_images.h5`` as ``shifts`` and plotted as ``drift.png``.
+decoded once to build the uncorrected (drift-blurred) projections, the median is
+sharpened into a template, and the video is decoded a second time to align every
+frame to it (roughly doubling the decode time). The corrected images are saved
+to ``projection_images.h5`` under the usual names, the uncorrected ones with a
+``_raw`` suffix (``median_raw``, ``max_proj_raw``, ...), and the per-frame drift
+as ``shifts`` (also plotted as ``drift.png``). The corrected preview video is
+``summary_video_motioncorrected.mp4``; the PNGs show the corrected images, with
+``_raw`` versions of them written alongside.
 """
 
 import os
 import re
 import csv
 import sys
+import yaml
 import shutil
 import subprocess
 from pathlib import Path
@@ -69,10 +77,12 @@ DRIFT_SAVE_NAME = 'drift.png'                # per-recording estimated drift plo
 MEDIAN_SAVE_NAME = 'median.png'              # per-recording median image
 STD_SAVE_NAME = 'std.png'                    # per-recording std image
 MAX_PROJ_SAVE_NAME = 'max_proj.png'          # per-recording max projection
+MIN_PROJ_SAVE_NAME = 'min_proj.png'          # per-recording min projection
 SUMMARY_NAME = 'summary_video.mp4'           # per-recording downsampled preview
 SUMMARY_MC_NAME = 'summary_video_motioncorrected.mp4'  # per-recording, corrected
 MKV_PATHS_NAME = 'mkv_paths.json'            # in the analysis folder
 GROUPED_H5_NAME = 'projection_images_grouped.h5'  # in the analysis folder
+CONFIG_NAME = 'config_concatenated.yaml'     # acquisition config, next to each .mkv
 
 # datasets required in projection_images.h5 for a recording to count as done.
 # `std` is included so recordings processed before it was added (which cannot be
@@ -80,9 +90,19 @@ GROUPED_H5_NAME = 'projection_images_grouped.h5'  # in the analysis folder
 PROJ_DATASETS = ('median', 'min_proj', 'max_proj', 'mean', 'mean_sq', 'std',
                  'frame_count', 'act')
 
+# datasets that, after motion correction, hold the corrected images and are also
+# saved uncorrected under the same name plus RAW_SUFFIX (e.g. `median_raw`)
+CORRECTED_DATASETS = ('median', 'min_proj', 'max_proj', 'mean', 'mean_sq',
+                      'std', 'act')
+RAW_SUFFIX = '_raw'
+
 # number of evenly-spaced frames kept to estimate the median (memory bounded;
 # the estimate is approximate but close to the true median)
-MEDIAN_SAMPLES = 1500
+MEDIAN_SAMPLES = 3000
+
+# preview contrast: low/high percentiles mapped to black/white in every preview
+# PNG (per image) and in the summary video (fixed for the whole video)
+CONTRAST_PCT = (0.2, 99.8)
 
 # motion-correction (rigid-translation drift) parameters. Drift is estimated by
 # phase correlation on spatially high-pass-filtered images so that structure
@@ -90,7 +110,8 @@ MEDIAN_SAMPLES = 1500
 # Gaussian sigma (px) of the low-pass that is subtracted to build the high-pass
 # image; UPSAMPLE sets the subpixel precision (1/UPSAMPLE px); REFINE_ITERS is
 # how many times the template is re-sharpened from the aligned median subsample
-# before the full correction pass.
+# before the full correction pass, using at most REFINE_SAMPLES of the median
+# subsample frames (evenly spaced; bounds the memory and time of refinement).
 #
 # DOWNSAMPLE speeds up the per-frame registration: the shift is estimated on a
 # DOWNSAMPLE-times smaller high-pass image (both the reference and each frame are
@@ -101,13 +122,16 @@ MEDIAN_SAMPLES = 1500
 HP_SIGMA = 8
 UPSAMPLE = 10
 REFINE_ITERS = 2
+REFINE_SAMPLES = 1500
 DOWNSAMPLE = 2
 
 # summary preview video: every frame is streamed straight to a compressed mp4
 # (so nothing is held in memory), spatially reduced by averaging 2x2 pixel blocks
-# (half resolution in each direction), and mapped to 8-bit by clipping
-# intensities to SUMMARY_CLIP. It plays back at the recording's real frame rate.
-SUMMARY_CLIP = 600
+# (half resolution in each direction), and mapped to 8-bit with one fixed
+# contrast (CONTRAST_PCT percentiles of VIDEO_CONTRAST_SAMPLES evenly spaced
+# container frames, i.e. 4x as many real frames, read by seeking before the
+# decode). It plays back at the acquisition frame rate from CONFIG_NAME.
+VIDEO_CONTRAST_SAMPLES = 100
 
 # raw tif -> .mkv conversion (`tif2mkv()`): FlyTrack saves each recording as
 # numbered RGBA tifs (4 real frames per tif) plus a `<n>_metadata.csv` per tif.
@@ -117,75 +141,6 @@ TIF_DURATION = 0.04
 FIXED_TIF_DIR = 'fixed_tif'                  # temporary, inside the tif folder
 TIF_LIST_NAME = 'list_tif.txt'               # temporary ffmpeg concat list
 FFMPEG_LOG_NAME = 'ffmpeg_tif_export.log'    # kept only if ffmpeg fails
-
-
-def _select_mkv_paths(input_folder: str) -> list[str]:
-    """
-    List the input folder's subfolders and let the user pick which to include.
-
-    The immediate subfolders of `input_folder` are listed in the terminal, each
-    with a number and its count of top-level .mkv files. Analysis folders (any
-    subfolder containing a `mkv_paths.json`) and subfolders with no top-level
-    .mkv files are excluded from the list. The user picks which to include with a
-    comma/space-separated list of numbers and ranges (e.g. ``1,3,5-7``), ``0`` or
-    ``all`` to include every listed subfolder, or ``q`` to cancel. The top-level
-    .mkv files of every chosen subfolder are collected, de-duplicated while
-    preserving order, and returned.
-
-    Parameters
-    ----------
-    input_folder : str
-        Folder whose immediate subfolders are offered for selection.
-
-    Returns
-    -------
-    list of str
-        Ordered, de-duplicated list of selected .mkv file paths.
-    """
-
-    # immediate subfolders, excluding analysis folders (those with mkv_paths.json)
-    candidates = sorted(
-        p for p in Path(input_folder).iterdir()
-        if p.is_dir() and not (p / MKV_PATHS_NAME).exists())
-
-    # keep only subfolders that actually contain top-level .mkv files
-    subfolders = []
-    mkv_per_folder = []
-    for sub in candidates:
-        mkvs = sorted(str(p) for p in sub.glob('*.mkv'))
-        if mkvs:
-            subfolders.append(sub)
-            mkv_per_folder.append(mkvs)
-
-    if len(subfolders) == 0:
-        print(f'No subfolders with .mkv files found in {input_folder}.')
-        return []
-
-    # list each subfolder with its top-level .mkv count
-    print(f'\nSubfolders in {input_folder}:')
-    print('  [0] all')
-    for i, (sub, mkvs) in enumerate(zip(subfolders, mkv_per_folder)):
-        print(f'  [{i + 1}] {sub.name}  ({len(mkvs)} .mkv)')
-
-    # ask which subfolders to include
-    selection = input("\nWhich subfolders to include? "
-                      "e.g. '1,3,5-7', '0' or 'all', or 'q' to cancel: ").strip().lower()
-    if selection in ('q', 'quit', ''):
-        return []
-    if selection == 'all' or '0' in selection.replace(',', ' ').split():
-        chosen = list(range(len(subfolders)))
-    else:
-        chosen = _parse_selection(selection, len(subfolders))
-
-    # collect top-level .mkv files from every chosen subfolder
-    mkv_paths: list[str] = []
-    for idx in chosen:
-        mkv_paths.extend(mkv_per_folder[idx])
-
-    # de-duplicate while preserving order
-    seen: set[str] = set()
-    unique = [p for p in mkv_paths if not (p in seen or seen.add(p))]
-    return unique
 
 
 def _parse_selection(selection: str, n: int) -> list[int]:
@@ -234,21 +189,17 @@ def _parse_selection(selection: str, n: int) -> list[int]:
     return sorted(indices)
 
 
-def _outputs_exist(dir: str, motion_correct: bool = False) -> bool:
+def _outputs_exist(dir: str) -> bool:
     """
-    Check whether a recording's per-folder outputs already exist.
+    Check whether a recording has already been processed.
 
-    Returns True only if both `metadata.txt` and a `projection_images.h5`
-    containing all required datasets are present in `dir`. When `motion_correct`
-    is requested, the `shifts` dataset must also be present, so that a recording
-    processed without correction is reprocessed rather than skipped.
+    Returns True only if a `projection_images.h5` containing all the datasets in
+    `PROJ_DATASETS` is present in `dir` (whether or not it was motion-corrected).
 
     Parameters
     ----------
     dir : str
         Folder containing the .mkv recording.
-    motion_correct : bool, optional
-        Whether motion correction is requested for this run.
 
     Returns
     -------
@@ -256,17 +207,74 @@ def _outputs_exist(dir: str, motion_correct: bool = False) -> bool:
         Whether the recording can be skipped.
     """
 
-    metadata_path = os.path.join(dir, METADATA_NAME)
     h5_path = os.path.join(dir, PROJ_H5_NAME)
-    if not (os.path.exists(metadata_path) and os.path.exists(h5_path)):
+    if not os.path.exists(h5_path):
         return False
-
-    required = PROJ_DATASETS + (('shifts',) if motion_correct else ())
     try:
         with h5py.File(h5_path, 'r') as f:
-            return all(key in f for key in required)
+            return all(key in f for key in PROJ_DATASETS)
     except OSError:
         return False
+
+
+def _is_corrected(dir: str) -> bool:
+    """
+    Check whether a recording's `projection_images.h5` is motion-corrected.
+
+    Parameters
+    ----------
+    dir : str
+        Folder containing the .mkv recording.
+
+    Returns
+    -------
+    bool
+        True if `projection_images.h5` exists and holds a `shifts` dataset.
+    """
+
+    h5_path = os.path.join(dir, PROJ_H5_NAME)
+    if not os.path.exists(h5_path):
+        return False
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            return 'shifts' in f
+    except OSError:
+        return False
+
+
+def _get_framerate(mkv_file: str,
+                   fallback: float) -> float:
+    """
+    Get the acquisition frame rate (real frames per second) of a recording.
+
+    Read from ``arduino: framerate`` in the ``config_concatenated.yaml`` saved
+    next to the .mkv file (a concatenation of several yaml documents, of which
+    the main config is the one holding the ``arduino`` section). If the config
+    is missing or has no frame rate, `fallback` is used instead.
+
+    Parameters
+    ----------
+    mkv_file : str
+        Path to the .mkv video file.
+    fallback : float
+        Frame rate to use if it can't be read from the config, e.g. the one
+        estimated from the timestamps by `utils.load_timestamps()`.
+
+    Returns
+    -------
+    float
+        Frame rate in Hz.
+    """
+
+    config_path = os.path.join(os.path.dirname(mkv_file), CONFIG_NAME)
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for doc in yaml.safe_load_all(f):
+                if isinstance(doc, dict) and 'framerate' in (doc.get('arduino') or {}):
+                    return float(doc['arduino']['framerate'])
+    print(f'  No frame rate found in {CONFIG_NAME}, using {fallback:.1f} Hz '
+          f'from the timestamps.')
+    return fallback
 
 
 def _highpass(img: np.ndarray, sigma: float = HP_SIGMA) -> np.ndarray:
@@ -403,6 +411,7 @@ def _refine_template(samples: np.ndarray,
     high-pass phase correlation) and a new template is taken as the median of
     the aligned frames. This runs entirely on the in-memory subsample (no extra
     video decode) and gives a crisper template for the full correction pass.
+    Only up to `REFINE_SAMPLES` evenly spaced frames of `samples` are used.
 
     Parameters
     ----------
@@ -425,17 +434,24 @@ def _refine_template(samples: np.ndarray,
         Refined template as float64, shape (H, W).
     """
 
+    # evenly spaced subset of at most REFINE_SAMPLES frames
+    if samples.shape[0] > REFINE_SAMPLES:
+        idx = np.linspace(0, samples.shape[0] - 1, REFINE_SAMPLES).round().astype(int)
+        samples = samples[idx]
+
     template = template.astype(np.float64)
     k = samples.shape[0] // 2
     for it in range(iters):
         ref_hp = _reference_hp(template, hp_sigma, downsample)
-        aligned = np.empty(samples.shape, dtype=np.float32)
+        # aligned frames kept as uint16 (rounded) to halve the memory
+        aligned = np.empty(samples.shape, dtype=np.uint16)
         for i, s in enumerate(tqdm.tqdm(samples,
                                         desc=f'Refining template {it+1}/{iters}',
                                         unit='frame')):
             shift = _estimate_shift(ref_hp, s, hp_sigma, upsample, downsample)
-            aligned[i] = ndimage.shift(s.astype(np.float64), shift,
-                                       order=1, mode='nearest')
+            shifted = ndimage.shift(s.astype(np.float64), shift,
+                                    order=1, mode='nearest')
+            aligned[i] = np.clip(np.round(shifted), 0, 65535)
         template = np.partition(aligned, k, axis=0)[k].astype(np.float64)
     return template
 
@@ -462,21 +478,76 @@ def _bin2x2(img: np.ndarray) -> np.ndarray:
     return img[:h2, :w2].reshape(h2 // 2, 2, w2 // 2, 2).mean(axis=(1, 3))
 
 
+def _video_contrast(mkv_file: str,
+                    n_samples: int = VIDEO_CONTRAST_SAMPLES) -> tuple[float, float]:
+    """
+    Get the fixed contrast range of a recording's summary video.
+
+    Seeks to `n_samples` evenly spaced container frames (cheap, as ffv1 is
+    intra-only so every frame is a keyframe), takes all 4 real frames of each,
+    reduces them to half resolution as in the summary video (`_bin2x2()`), and
+    returns the `CONTRAST_PCT` percentiles of their pooled pixels (every other
+    pixel in each direction, to bound memory). If seeking fails, the first
+    `n_samples` container frames are used instead.
+
+    Parameters
+    ----------
+    mkv_file : str
+        Absolute path to the source .mkv video file.
+    n_samples : int, optional
+        Number of container frames to sample.
+
+    Returns
+    -------
+    tuple[float, float]
+        (low, high) intensities mapped to black and white in the summary video.
+    """
+
+    frames = []
+    container = av.open(mkv_file)
+    stream = container.streams.video[0]
+    try:
+        # container.duration is in av.time_base units (microseconds)
+        for t in np.linspace(0, container.duration * 0.99, n_samples):
+            container.seek(int(t))
+            frames.append(next(container.decode(stream)).to_ndarray(format='rgba64le'))
+    except Exception as e:  # e.g. no duration or a file that can't be seeked
+        print(f'  Could not seek in {os.path.basename(mkv_file)} ({e}); using '
+              f'the first {n_samples} frames for the summary video contrast.')
+        container.close()
+        container = av.open(mkv_file)
+        frames = []
+        for frame in container.decode(video=0):
+            frames.append(frame.to_ndarray(format='rgba64le'))
+            if len(frames) >= n_samples:
+                break
+    container.close()
+
+    pixels = np.concatenate([_bin2x2(f[..., j])[::2, ::2].ravel().astype(np.float32)
+                             for f in frames for j in range(f.shape[2])])
+    lo, hi = np.percentile(pixels, CONTRAST_PCT)
+    if hi <= lo:
+        hi = lo + 1
+    return float(lo), float(hi)
+
+
 def _decode_projections(mkv_file: str,
+                        n_frames: int,
                         template: np.ndarray | None = None,
                         hp_sigma: float = HP_SIGMA,
                         upsample: int = UPSAMPLE,
                         downsample: int = DOWNSAMPLE,
-                        n_frames: int | None = None,
                         summary_path: str | None = None,
-                        summary_fps: float = 30.0) -> dict:
+                        summary_fps: float = 30.0,
+                        video_contrast: tuple[float, float] = (0, 600)) -> dict:
     """
     Decode one .mkv once and accumulate its projection images.
 
     Decodes the video (4 real frames packed per container frame, 16-bit) and
     computes the min and max projections, the cumulative mean and mean of
-    squares (for the std image), the per-frame mean fluorescence, and an
-    evenly-spaced frame subsample used to estimate the median.
+    squares and the whole-video std image built from them, the per-frame mean
+    fluorescence, and a subsample of `MEDIAN_SAMPLES` evenly spaced frames used
+    to estimate the median.
 
     If `template` is given, each real frame is drift-corrected before being
     accumulated: its rigid-translation shift is estimated by `_estimate_shift()`
@@ -489,6 +560,10 @@ def _decode_projections(mkv_file: str,
     ----------
     mkv_file : str
         Absolute path to the source .mkv video file.
+    n_frames : int
+        Expected number of real frames (the timestamp count; .mkv does not
+        expose a frame count). Sets the median subsample positions and the
+        progress-bar total.
     template : np.ndarray or None, optional
         Full-resolution reference image to align every frame to. If None, no
         correction is done and the projections are built from the raw frames.
@@ -498,23 +573,23 @@ def _decode_projections(mkv_file: str,
         Subpixel upsampling factor for `phase_cross_correlation()`.
     downsample : int, optional
         Integer downsampling factor for registration (see `_estimate_shift()`).
-    n_frames : int or None, optional
-        Expected number of real frames, used only as the progress-bar total
-        (.mkv does not expose a frame count). If None, the bar shows no ETA.
     summary_path : str or None, optional
         If given, a half-resolution (2x2-averaged), compressed preview mp4 of the
         (corrected, if `template` is set) frames is streamed to this path, one
         entry per frame.
     summary_fps : float, optional
         Playback frame rate of the preview mp4 (use the real recording fps).
+    video_contrast : tuple of float, optional
+        (low, high) intensities mapped to black and white in the preview mp4,
+        see `_video_contrast()`.
 
     Returns
     -------
     dict
-        Keys: 'median', 'min_proj', 'max_proj' (uint16), 'mean', 'mean_sq'
-        (float64), 'act' (float64, per-frame mean), 'samples' (uint16 subsample
-        stack, for template refinement), 'shifts' ((n, 2) float64 (dy, dx) or
-        None if uncorrected), 'n', 'width', 'height'.
+        Keys: 'median', 'min_proj', 'max_proj' (uint16), 'mean', 'mean_sq',
+        'std' (float64), 'act' (float64, per-frame mean), 'samples' (uint16
+        subsample stack, for template refinement), 'shifts' ((n, 2) float64
+        (dy, dx) or None if uncorrected), 'n', 'width', 'height'.
     """
 
     correct = template is not None
@@ -539,11 +614,13 @@ def _decode_projections(mkv_file: str,
     act: list[float] = []
     shifts: list[np.ndarray] = []
 
-    # evenly-spaced subsample of frames for the (approximate) median. We keep
-    # every `median_stride`-th frame; whenever the buffer grows too large we
-    # halve it and double the stride, keeping the sample roughly even.
-    median_samples: list[np.ndarray] = []
-    median_stride = 1
+    # evenly spaced subsample of frames for the (approximate) median, at
+    # positions set from the expected frame count (preallocated buffer)
+    n_samples = max(1, min(MEDIAN_SAMPLES, n_frames))
+    sample_idx = np.unique(np.linspace(0, n_frames - 1, n_samples).round().astype(int))
+    sample_pos = {int(i): k for k, i in enumerate(sample_idx)}
+    samples = np.zeros((len(sample_idx), height, width), dtype=np.uint16)
+    n_sampled = 0
 
     # optional preview video: every frame is streamed to a compressed mp4 (half
     # resolution via 2x2 averaging), so nothing is held in memory
@@ -553,15 +630,15 @@ def _decode_projections(mkv_file: str,
         summary_writer = cv2.VideoWriter(
             summary_path, cv2.VideoWriter_fourcc(*'mp4v'),
             summary_fps, (sw, sh))
+        lo, hi = video_contrast
 
     n = 0  # real-frame counter
     container = av.open(mkv_file)
     stream = container.streams.video[0]
     stream.thread_type = 'AUTO'
 
-    # .mkv (Matroska) does not expose a frame count, so tqdm's total comes from
-    # the caller's `n_frames` hint (the timestamp count); the bar counts real
-    # frames and is updated once per decoded packet (which holds 4 of them)
+    # the bar counts real frames and is updated once per decoded packet (which
+    # holds 4 of them)
     desc = 'Correcting + decoding' if correct else 'Decoding'
     pbar = tqdm.tqdm(total=n_frames, desc=desc, unit='frame')
     for frame in container.decode(stream):
@@ -584,16 +661,13 @@ def _decode_projections(mkv_file: str,
             sum_sq += img_f * img_f
             act.append(img_f.mean())
 
-            if n % median_stride == 0:
-                sample = np.clip(np.round(img_f), 0, 65535).astype(np.uint16)
-                median_samples.append(sample)
-                if len(median_samples) >= 2 * MEDIAN_SAMPLES:
-                    median_samples = median_samples[::2]
-                    median_stride *= 2
+            if n in sample_pos:
+                samples[sample_pos[n]] = np.clip(np.round(img_f), 0, 65535)
+                n_sampled += 1
 
             if summary:
-                small = _bin2x2(img_f)
-                small = np.clip(small, 0, SUMMARY_CLIP) / SUMMARY_CLIP * 255
+                small = (_bin2x2(img_f) - lo) / (hi - lo)
+                small = np.clip(small, 0, 1) * 255
                 summary_writer.write(
                     cv2.cvtColor(small.astype(np.uint8), cv2.COLOR_GRAY2BGR))
 
@@ -605,12 +679,14 @@ def _decode_projections(mkv_file: str,
     container.close()
     print(f'Decoded {n} real frames.')
 
-    # cumulative statistics
+    # cumulative statistics and the whole-video std: std = sqrt(E[x^2] - E[x]^2)
     mean = sum_ / n
     mean_sq = sum_sq / n
+    std = np.sqrt(np.clip(mean_sq - mean ** 2, 0, None))
 
-    # approximate median from the evenly-spaced subsample
-    samples = np.stack(median_samples)
+    # approximate median from the evenly spaced subsample (only the positions
+    # that were reached, in case the video has fewer frames than expected)
+    samples = samples[:n_sampled]
     k = samples.shape[0] // 2
     median_frame = np.partition(samples, k, axis=0)[k]
     print(f'Estimated median from {samples.shape[0]} subsampled frames.')
@@ -626,6 +702,7 @@ def _decode_projections(mkv_file: str,
         'max_proj': np.clip(np.round(max_proj), 0, 65535).astype(np.uint16),
         'mean': mean,
         'mean_sq': mean_sq,
+        'std': std,
         'act': np.array(act),
         'samples': samples,
         'shifts': np.array(shifts) if correct else None,
@@ -635,21 +712,23 @@ def _decode_projections(mkv_file: str,
     }
 
 
-def _autocontrast_8bit(img: np.ndarray, hi_pct: float = 99.8) -> np.ndarray:
+def _autocontrast_8bit(img: np.ndarray,
+                       pct: tuple[float, float] = CONTRAST_PCT) -> np.ndarray:
     """
-    Map an image to 8-bit, auto-contrasted between its minimum and a percentile.
+    Map an image to 8-bit, auto-contrasted between two of its percentiles.
 
-    The image is linearly rescaled so its minimum maps to 0 and its `hi_pct`
-    percentile maps to 255 (values above are clipped), which keeps bright
-    outliers from washing out the visible range. If the percentile is not above
-    the minimum, the true maximum is used instead.
+    The image is linearly rescaled so its `pct[0]` percentile maps to 0 and its
+    `pct[1]` percentile maps to 255 (values outside are clipped), which keeps a
+    few very dark or bright outlier pixels from washing out the visible range.
+    If the high percentile is not above the low one, the true min and max are
+    used instead.
 
     Parameters
     ----------
     img : np.ndarray
         Image to rescale.
-    hi_pct : float, optional
-        Percentile mapped to 255.
+    pct : tuple of float, optional
+        (low, high) percentiles mapped to 0 and 255.
 
     Returns
     -------
@@ -658,10 +737,9 @@ def _autocontrast_8bit(img: np.ndarray, hi_pct: float = 99.8) -> np.ndarray:
     """
 
     img_f = img.astype(np.float64)
-    lo = img_f.min()
-    hi = np.percentile(img_f, hi_pct)
+    lo, hi = np.percentile(img_f, pct)
     if hi <= lo:
-        hi = img_f.max()
+        lo, hi = img_f.min(), img_f.max()
     scaled = np.clip((img_f - lo) / (hi - lo + 1e-9), 0, 1) * 255
     return scaled.astype(np.uint8)
 
@@ -670,12 +748,13 @@ def _write_pngs(path: str) -> None:
     """
     Save auto-contrasted 8-bit preview PNGs next to a projection-images h5.
 
-    Reads the `median`, `max_proj`, and `std` datasets from a projection-images
-    h5 and writes three auto-contrasted 8-bit PNGs in the same folder:
-    `median.png` (the median image), `max_proj.png` (the max projection), and
-    `std.png` (the std image). The `std` dataset must
-    already exist (it is computed during preprocessing); it is not rebuilt here,
-    so re-run preprocessing if it is missing.
+    Reads the `median`, `max_proj`, `min_proj`, and `std` datasets from a
+    projection-images h5 (those that are present; the grouped h5 has no
+    `min_proj`) and writes each as an auto-contrasted 8-bit PNG in the same
+    folder (see `_autocontrast_8bit()`): `median.png`, `max_proj.png`,
+    `min_proj.png`, and `std.png`. If the h5 is motion-corrected and also holds
+    the uncorrected images (`median_raw`, ...), those are written too, as
+    `median_raw.png`, ....
 
     Parameters
     ----------
@@ -709,48 +788,82 @@ def _write_pngs(path: str) -> None:
             raise FileNotFoundError(
                 f'Folder does not contain {os.path.basename(h5_path)}: {dir}')
 
+    png_names = {'median': MEDIAN_SAVE_NAME, 'max_proj': MAX_PROJ_SAVE_NAME,
+                 'min_proj': MIN_PROJ_SAVE_NAME, 'std': STD_SAVE_NAME}
     with h5py.File(h5_path, 'r') as f:
-        median = f['median'][:]       # type: ignore[index]
-        max_proj = f['max_proj'][:]   # type: ignore[index]
-        std = f['std'][:]             # type: ignore[index]
+        for key, name in png_names.items():
+            for suffix in ('', RAW_SUFFIX):
+                if key + suffix in f:
+                    img = f[key + suffix][:]  # type: ignore[index]
+                    png_path = os.path.join(dir, name.replace('.png', suffix + '.png'))
+                    cv2.imwrite(png_path, _autocontrast_8bit(img))
 
-    # median image, auto-contrasted min..99.8th percentile
-    cv2.imwrite(os.path.join(dir, MEDIAN_SAVE_NAME), _autocontrast_8bit(median))
 
-    # max projection, auto-contrasted min..99.8th percentile
-    cv2.imwrite(os.path.join(dir, MAX_PROJ_SAVE_NAME),
-                _autocontrast_8bit(max_proj))
+def _plot_activity(mkv_file: str,
+                   act: np.ndarray,
+                   act_path: str) -> None:
+    """
+    Plot the mean fluorescence of a recording over time and save it as a png.
 
-    # std image, auto-contrasted min..99.8th percentile
-    cv2.imwrite(os.path.join(dir, STD_SAVE_NAME), _autocontrast_8bit(std))
+    Parameters
+    ----------
+    mkv_file : str
+        Path to the .mkv video file (its timestamps give the time axis).
+    act : np.ndarray
+        Mean fluorescence of every real frame.
+    act_path : str
+        Save path of the plot; its folder is created if needed.
+    """
 
+    timestamps, _ = utils.load_timestamps(mkv_file)
+    if len(timestamps) != len(act):
+        print(f'Warning: number of timestamps ({len(timestamps)}) does not match '
+              f'number of frames ({len(act)}), LOST FRAMES.')
+    n = min(len(timestamps), len(act))
+    plt.figure(figsize=(10, 3))
+    plt.plot(timestamps[:n] / 60, act[:n], linewidth=0.5)  # in minutes
+    plt.xlim(0, timestamps[n - 1] / 60)
+    plt.xlabel('Time (min)')
+    plt.ylabel('Mean fluorescence')
+    plt.title(os.path.basename(mkv_file))
+    os.makedirs(os.path.dirname(act_path), exist_ok=True)
+    plt.savefig(act_path, dpi=300)
+    plt.close()
 
 
 def _process_mkv(mkv_file: str,
+                 act_path: str | None = None,
                  motion_correct: bool = False) -> tuple[list[int], int, float]:
     """
     Decode one .mkv and write its projection images and metadata.
 
     Builds the projection images with `_decode_projections()` and saves them to
     `projection_images.h5` and `metadata.txt` in the same folder as the video,
-    plus the `activity.png` mean-fluorescence plot. The whole-video std image is
-    rebuilt from the cumulative mean/mean_sq and stored in the h5 as `std`, and
-    two auto-contrasted preview PNGs are written next to the video: `median.png`
-    (the median image) and `max_proj.png` (the max projection).
+    plus the mean-fluorescence plot at `act_path`, the preview PNGs (see
+    `_write_pngs()`), and the half-resolution `summary_video.mp4` (fixed
+    contrast from `_video_contrast()`, at the frame rate from
+    `_get_framerate()`).
 
-    If `motion_correct` is True, rigid-translation drift is removed first: the
-    video is decoded once to build a (drift-blurred) median, that median is
-    sharpened into a template with `_refine_template()`, and the video is
-    decoded a second time to build drift-corrected projections. This roughly
-    doubles the decode time. The per-frame drift is then also saved to the h5 as
-    `shifts` and plotted as `drift.png`.
+    If `motion_correct` is True, rigid-translation drift is removed too: the
+    video is decoded once to build the uncorrected projections (also writing
+    `summary_video.mp4` if it doesn't exist yet), their median is sharpened into
+    a template with `_refine_template()`, and the video is decoded a second time
+    to build drift-corrected projections. This roughly doubles the decode time.
+    The corrected images are saved under the usual dataset names, the
+    uncorrected ones with a `_raw` suffix, and the per-frame drift as `shifts`
+    (also plotted as `drift.png`); the corrected preview video is
+    `summary_video_motioncorrected.mp4`, and the activity plot is made from the
+    corrected frames.
 
     Parameters
     ----------
     mkv_file : str
         Absolute path to the source .mkv video file.
+    act_path : str or None, optional
+        Save path of the activity plot. If None, `activity.png` next to the
+        video.
     motion_correct : bool, optional
-        Whether to correct rigid-translation drift before building projections.
+        Whether to correct rigid-translation drift.
 
     Returns
     -------
@@ -759,75 +872,64 @@ def _process_mkv(mkv_file: str,
     """
 
     dir = os.path.dirname(mkv_file)
+    if act_path is None:
+        act_path = os.path.join(dir, ACT_SAVE_NAME)
 
-    # timestamps and fps from the matching _tif_metadata.h5 file; the timestamp
-    # count is the expected frame count used for the decode progress-bar totals
-    timestamps, fps = utils.load_timestamps(mkv_file)
+    # timestamps from the matching _tif_metadata.h5 file; their count is the
+    # expected frame count. The fps comes from the acquisition config.
+    timestamps, ts_fps = utils.load_timestamps(mkv_file)
     n_frames = len(timestamps)
+    fps = _get_framerate(mkv_file, fallback=ts_fps)
 
-    # the summary video is written from the frames the outputs are built from
-    # (the corrected frames when motion-correcting), with a distinct name
-    summary_name = SUMMARY_MC_NAME if motion_correct else SUMMARY_NAME
-    summary_path = os.path.join(dir, summary_name)
+    print('Sampling frames for the summary video contrast...')
+    contrast = _video_contrast(mkv_file)
+    summary_path = os.path.join(dir, SUMMARY_NAME)
 
     if motion_correct:
-        # pass 1: build a drift-blurred median to seed the alignment template
-        print('Motion correction: building initial template...')
-        seed = _decode_projections(mkv_file, n_frames=n_frames)
-        template = _refine_template(seed['samples'], seed['median'])
+        # pass 1: uncorrected projections, which also seed the alignment template
+        print('Motion correction: building uncorrected projections and template...')
+        raw_summary = None if os.path.exists(summary_path) else summary_path
+        raw = _decode_projections(mkv_file, n_frames,
+                                  summary_path=raw_summary, summary_fps=fps,
+                                  video_contrast=contrast)
+        template = _refine_template(raw.pop('samples'), raw['median'])
         # pass 2: align every frame to the sharpened template
-        proj = _decode_projections(mkv_file, template=template,
-                                   n_frames=n_frames, summary_path=summary_path,
-                                   summary_fps=fps)
+        proj = _decode_projections(mkv_file, n_frames, template=template,
+                                   summary_path=os.path.join(dir, SUMMARY_MC_NAME),
+                                   summary_fps=fps, video_contrast=contrast)
     else:
-        proj = _decode_projections(mkv_file, n_frames=n_frames,
-                                   summary_path=summary_path, summary_fps=fps)
+        raw = None
+        proj = _decode_projections(mkv_file, n_frames,
+                                   summary_path=summary_path, summary_fps=fps,
+                                   video_contrast=contrast)
 
     n = proj['n']
     width, height = proj['width'], proj['height']
 
-    # whole-video std image from the cumulative statistics: std = sqrt(E[x^2] - E[x]^2)
-    std = np.sqrt(np.clip(proj['mean_sq'] - proj['mean'] ** 2, 0, None))
-
-    # save projection images, cumulative stats, and mean fluorescence
+    # save projection images, cumulative stats, and mean fluorescence (plus the
+    # uncorrected versions and the drift when motion-correcting)
     h5_path = os.path.join(dir, PROJ_H5_NAME)
     with h5py.File(h5_path, 'w') as f:
-        f.create_dataset('median', data=proj['median'])
-        f.create_dataset('min_proj', data=proj['min_proj'])
-        f.create_dataset('max_proj', data=proj['max_proj'])
-        f.create_dataset('mean', data=proj['mean'])
-        f.create_dataset('mean_sq', data=proj['mean_sq'])
-        f.create_dataset('std', data=std)
+        for key in CORRECTED_DATASETS:
+            f.create_dataset(key, data=proj[key])
         f.create_dataset('frame_count', data=n)
-        f.create_dataset('act', data=proj['act'])
-        if proj['shifts'] is not None:
+        if raw is not None:
+            for key in CORRECTED_DATASETS:
+                f.create_dataset(key + RAW_SUFFIX, data=raw[key])
             f.create_dataset('shifts', data=proj['shifts'])
 
-    # save the median / max projection / std preview PNGs
+    # save the preview PNGs and the mean fluorescence plot
     _write_pngs(h5_path)
-
-    # plot the mean fluorescence over time and save as a png
-    act = proj['act']
-    if len(timestamps) != len(act):
-        print(f'Warning: number of timestamps ({len(timestamps)}) does not match '
-              f'number of frames ({len(act)}), LOST FRAMES.')
-        timestamps = timestamps[:len(act)]
-    plt.figure(figsize=(10, 3))
-    plt.plot(timestamps / 60, act, linewidth=0.5)  # in minutes
-    plt.xlim(0, timestamps[-1] / 60)
-    plt.xlabel('Time (min)')
-    plt.ylabel('Mean fluorescence')
-    plt.title(os.path.basename(mkv_file))
-    plt.savefig(os.path.join(dir, ACT_SAVE_NAME), dpi=300)
-    plt.close()
+    _plot_activity(mkv_file, proj['act'], act_path)
 
     # plot the estimated drift over time and save as a png
     if proj['shifts'] is not None:
         dy, dx = proj['shifts'][:, 0], proj['shifts'][:, 1]
+        m = min(len(timestamps), len(dy))
         plt.figure(figsize=(10, 3))
-        plt.plot(timestamps / 60, dx[:len(timestamps)], linewidth=0.5, label='x')
-        plt.plot(timestamps / 60, dy[:len(timestamps)], linewidth=0.5, label='y')
-        plt.xlim(0, timestamps[-1] / 60)
+        plt.plot(timestamps[:m] / 60, dx[:m], linewidth=0.5, label='x')
+        plt.plot(timestamps[:m] / 60, dy[:m], linewidth=0.5, label='y')
+        plt.xlim(0, timestamps[m - 1] / 60)
         plt.xlabel('Time (min)')
         plt.ylabel('Estimated drift (px)')
         plt.title(os.path.basename(mkv_file))
@@ -851,8 +953,8 @@ def _read_existing_metadata(mkv_file: str) -> tuple[list[int], int, float]:
     """
     Read size, frame count, and fps for an already-processed recording.
 
-    Size and frame count are read from `projection_images.h5`; fps is derived
-    from the matching timestamps file via `utils.load_timestamps()`.
+    Size and frame count are read from `projection_images.h5`; fps from the
+    acquisition config (or the timestamps), see `_get_framerate()`.
 
     Parameters
     ----------
@@ -870,7 +972,8 @@ def _read_existing_metadata(mkv_file: str) -> tuple[list[int], int, float]:
         height, width = f['max_proj'].shape  # type: ignore[index]
         num_frames = int(f['frame_count'][()])  # type: ignore[index]
 
-    _, fps = utils.load_timestamps(mkv_file)
+    _, ts_fps = utils.load_timestamps(mkv_file)
+    fps = _get_framerate(mkv_file, fallback=ts_fps)
 
     return [int(width), int(height)], num_frames, float(fps)
 
