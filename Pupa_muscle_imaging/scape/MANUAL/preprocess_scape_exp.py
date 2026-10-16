@@ -20,7 +20,7 @@ creates a new folder called sample#_combined and combines all the projections fo
 sample, before moving on to the next sample. Samples with a single run get no
 sample#_combined folder (use the sample#_run# folder directly).
 
-Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder]`) or imported
+Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder] [-b N]`) or imported
 and called as a function. If `exp_folder` is not given, a folder-selection dialog opens,
 starting in `scape_utils.MAIN_PATH`.
 
@@ -213,7 +213,8 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
         save_HR_deskewed_tif(hr_path)
 
 
-def preprocess_scape_exp(exp_folder: str | Path | None = None) -> None:
+def preprocess_scape_exp(exp_folder: str | Path | None = None,
+                         batch_size: int = 50) -> None:
     """
     Preprocess all SCAPE recordings in an experiment folder.
 
@@ -233,6 +234,9 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None) -> None:
     exp_folder : str | Path | None
         Path to the experiment folder containing the `sample#_run#` subfolders.
         If None, a folder-selection dialog opens starting in `scape_utils.MAIN_PATH`.
+    batch_size : int
+        Number of volumes loaded at a time when computing the projection images
+        (passed to `scape_utils.get_projection_images`). Default 50.
 
     Returns
     -------
@@ -293,7 +297,7 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None) -> None:
                 print(f'Projections already found for {scape_path.name}.')
             else:
                 print(f'Projections not found for {scape_path.name}. Computing them...')
-                scape_utils.get_projection_images(scape_path)
+                scape_utils.get_projection_images(scape_path, batch_size=batch_size)
 
         if len(run_paths) > 1:
             scape_utils.combine_sample_projections(exp_folder, sample_name, run_paths)
@@ -306,5 +310,8 @@ if __name__ == '__main__':
     parser.add_argument('exp_folder', nargs='?', default=None,
                         help='Path to the experiment folder. If omitted, a folder-selection '
                              f'dialog opens starting in {scape_utils.MAIN_PATH}.')
+    parser.add_argument('-b', '--batch_size', '--batch-size', type=int, default=50,
+                        help='Number of volumes loaded at a time when computing the '
+                             'projection images (default: 50).')
     args = parser.parse_args()
-    preprocess_scape_exp(args.exp_folder)
+    preprocess_scape_exp(args.exp_folder, batch_size=args.batch_size)
