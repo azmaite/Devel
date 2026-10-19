@@ -7,13 +7,13 @@ This is a challenging registration problem because each leg is more or less rigi
 This project will:
 - Load a 3D image projection of fly legs, collected using SCAPE and already preprocessed and saved in an h5 file. Also load the voxel sizes, saved in the same h5 file.
 
-- Split the two hemibodies to process one at a time, by first finding the symmetry plane. Flip one side to have two equivalent hemibodies
+- REMOVE THE ANISOTROPY - this is very important, as otherwise rotating a leg (or mirroring across a tilted plane) will make it look very different depending on the original angle in relation to the axes. Reduce resolution in some directions and increase it in the others to keep file size approximately similar. Remove the anisotropy on the segment labels and reference image too, keeping the same scale for both. This is done on the whole volumes, before finding the symmetry plane.
+
+- Split the two hemibodies to process one at a time, by first finding the (slightly tilted) symmetry plane, rotating the volume so the plane is perpendicular to axis 2, and cropping. Flip one side to have two equivalent hemibodies
 
 - Load the REFERENCE 3D projection, which has been manually segmented to isolate all the leg segments (femur, tibia, etc.). Split this reference too into two hemibodies
 
 - Normalize the new image to match the reference image range
-
-- REMOVE THE ANISOTROPY - this is very important, as otherwise rotating a leg will make it look very different depending on the original angle in relation to the axes. Reduce resolution in some directions and increase it in the others to keep file size approximately similar. Remove the anisotropy on the segment labels and reference image too, keeping the same scale for both.
 
 - Crop/pad the images to have identical dimensions for both.
 
