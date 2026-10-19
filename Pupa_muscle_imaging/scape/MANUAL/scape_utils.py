@@ -31,6 +31,8 @@ load_voxel_size: get voxel size of a deskewed scape 3D video (XYZ). For a sample
 load_aspect_ratio_YX: get aspect ratio of a scape 3D video for Y/X (most common view)
 load_proj: load the specified projection ('max_proj', 'min_proj', or 'std_image') of a
     SCAPE 3D video. If not already calculated, will compute and save all projection images.
+get_auto_batch_size: choose the number of volumes to load per batch from the recording's
+    volume size (raw voxels per volume), to keep memory use roughly constant
 get_projection_images: compute the std, maximum, and minimum projection images, and an
     activity trace (mean fluorescence per volume, ignoring zero voxels), of a SCAPE 3D
     video. Saves the projections, activity trace, and voxel size (`voxel_sizes_xyz`) in
@@ -60,6 +62,7 @@ import matplotlib.pyplot as plt
 MAIN_PATH = '/mnt/upramdya_data/MA/SCAPE'
 ANALYSIS_PATH_NAME = "analysis"
 PROJECTION_FILE_NAME = "projection_images.h5"
+AUTO_BATCH_VOXELS = 1.4e9 # raw voxels loaded per batch by get_auto_batch_size
 
 
 def load_napari_rois(roi_path: str | Path) -> np.ndarray:
@@ -287,7 +290,48 @@ def load_proj(scape_path: str | Path, proj_type: str) -> np.ndarray:
         proj = f[proj_type][:]
     return proj
 
-def get_projection_images(scape_path: str | Path, batch_size: int = 50):
+def get_auto_batch_size(scape_path: str | Path) -> int:
+    """
+    Choose how many volumes to load per batch in `get_projection_images` so
+    that the memory used per batch is about constant, whatever the size of
+    the recording's volumes.
+
+    Memory per batch scales with the number of raw voxels per volume
+    (planes per volume x image height x image width, from the recording's
+    metadata), so the batch size is `AUTO_BATCH_VOXELS` divided by that,
+    rounded and clipped to between 1 and the number of volumes. The budget
+    is calibrated on recordings that are known to work: batches of 50
+    volumes of ~100 planes (~27 Mvoxels per volume) and batches of 7 volumes
+    of ~750 planes (~200 Mvoxels per volume).
+
+    Parameters
+    ----------
+    scape_path : str | Path
+        Path to a single `sample#_run#` folder (with its folder structure
+        already fixed by `check_folder_structure`).
+
+    Returns
+    -------
+    int
+        Number of volumes to load per batch.
+    """
+    scape_path = Path(scape_path)
+    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio
+    scan_name = scapeio.get_scan_name(scape_raw_path)
+    daq_metadata = scapeio.load_matlab_metadata(scan_name)['daq']
+    camera_metadata = scapeio.load_camera_metadata(scan_name)['data']
+    num_volumes = int(daq_metadata['numberOfScans'])
+    voxels_per_volume = (int(daq_metadata['pixelsPerLine'])
+                         * int(camera_metadata['aoiheight'])
+                         * int(camera_metadata['aoiwidth']))
+    batch_size = int(round(AUTO_BATCH_VOXELS / voxels_per_volume))
+    batch_size = max(1, min(batch_size, num_volumes))
+    print(f'Auto batch size for {scape_path.name}: {batch_size} volumes '
+          f'({voxels_per_volume / 1e6:.0f} Mvoxels per volume)')
+    return batch_size
+
+
+def get_projection_images(scape_path: str | Path, batch_size: int | None = None):
     """
     Get the std, maximum and minimum projection images, and the activity trace
     (mean fluorescence per volume, ignoring zero voxels as if they were nan),
@@ -307,8 +351,12 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
         `sample#_run#` folder, not a `sample#_combined` one - a
         combined folder has no raw data of its own to compute these
         from (see `combine_sample_projections` instead).
-    batch_size : int
-        Number of volumes to load per batch.
+    batch_size : int | None
+        Number of volumes to load per batch. If None (default), chosen
+        automatically from the volume size (see `get_auto_batch_size`).
+        A last batch holding a single
+        volume is handled correctly (scapeio returns it without a time axis,
+        which is re-added here).
     """
     # set save path
     scape_path = Path(scape_path)
@@ -326,6 +374,9 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
     frame_count = 0
     activity_batches = []
 
+    if batch_size is None:
+        batch_size = get_auto_batch_size(scape_path)
+
     scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio.load_scan
     _, num_volumes, scan_rate = scapeio.get_scan_timing(scape_raw_path)
 
@@ -334,8 +385,14 @@ def get_projection_images(scape_path: str | Path, batch_size: int = 50):
         start_volume = i
         end_volume = min(i + batch_size, num_volumes)
         print(f'Loading volumes {start_volume} to {end_volume}...')
-        video_batch, _ = scapeio.load_scan(scape_raw_path, colors=1, start_volume=start_volume,
-                                           end_volume=end_volume - 1, return_axis_order=True)
+        video_batch, axis_order = scapeio.load_scan(scape_raw_path, colors=1,
+                                                    start_volume=start_volume,
+                                                    end_volume=end_volume - 1,
+                                                    return_axis_order=True)
+        if 't' not in axis_order:
+            # scapeio drops the time axis when a batch holds a single volume (e.g. a
+            # last batch of 1 volume); restore it so axis 0 is always time
+            video_batch = video_batch[np.newaxis]
 
         deskewed_batch = scapeio.operations.deskew_scan(scape_raw_path, images=video_batch)
         deskewed_batch = deskewed_batch.astype(np.float32)

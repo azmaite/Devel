@@ -20,9 +20,12 @@ creates a new folder called sample#_combined and combines all the projections fo
 sample, before moving on to the next sample. Samples with a single run get no
 sample#_combined folder (use the sample#_run# folder directly).
 
-Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder] [-b N]`) or imported
+Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder] [-b N] [-o]`) or imported
 and called as a function. If `exp_folder` is not given, a folder-selection dialog opens,
 starting in `scape_utils.MAIN_PATH`.
+The number of volumes loaded per batch when computing projections is chosen automatically
+from each run's volume size, unless given with -b. With -o/--overwrite, projections are
+recomputed even if they already exist.
 
 save_HR_deskewed_tif: deskew a converted HR nrrd and save it as a calibrated OME-TIFF.
 convert_HR_folders: convert all sample#_run#_HR subfolders of an experiment folder to a
@@ -214,7 +217,8 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
 
 
 def preprocess_scape_exp(exp_folder: str | Path | None = None,
-                         batch_size: int = 50) -> None:
+                         batch_size: int | None = None,
+                         overwrite: bool = False) -> None:
     """
     Preprocess all SCAPE recordings in an experiment folder.
 
@@ -234,9 +238,15 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
     exp_folder : str | Path | None
         Path to the experiment folder containing the `sample#_run#` subfolders.
         If None, a folder-selection dialog opens starting in `scape_utils.MAIN_PATH`.
-    batch_size : int
+    batch_size : int | None
         Number of volumes loaded at a time when computing the projection images
-        (passed to `scape_utils.get_projection_images`). Default 50.
+        (passed to `scape_utils.get_projection_images`). If None (default), chosen
+        automatically for each run from its volume size (see
+        `scape_utils.get_auto_batch_size`).
+    overwrite : bool
+        If True, recompute the projection images of every kept run even if they
+        already exist (the sample#_combined projections are always recomputed).
+        Default False.
 
     Returns
     -------
@@ -293,10 +303,11 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
         for scape_path in run_paths:
             scape_utils.check_folder_structure(scape_path)
             h5_path = scape_path / scape_utils.ANALYSIS_PATH_NAME / scape_utils.PROJECTION_FILE_NAME
-            if h5_path.exists():
+            if h5_path.exists() and not overwrite:
                 print(f'Projections already found for {scape_path.name}.')
             else:
-                print(f'Projections not found for {scape_path.name}. Computing them...')
+                print(f'Projections {"found, overwriting" if h5_path.exists() else "not found"} '
+                      f'for {scape_path.name}. Computing them...')
                 scape_utils.get_projection_images(scape_path, batch_size=batch_size)
 
         if len(run_paths) > 1:
@@ -310,8 +321,12 @@ if __name__ == '__main__':
     parser.add_argument('exp_folder', nargs='?', default=None,
                         help='Path to the experiment folder. If omitted, a folder-selection '
                              f'dialog opens starting in {scape_utils.MAIN_PATH}.')
-    parser.add_argument('-b', '--batch_size', '--batch-size', type=int, default=50,
+    parser.add_argument('-b', '--batch_size', '--batch-size', type=int, default=None,
                         help='Number of volumes loaded at a time when computing the '
-                             'projection images (default: 50).')
+                             'projection images (default: chosen automatically for each '
+                             'run from its volume size).')
+    parser.add_argument('-o', '--overwrite', action='store_true',
+                        help='Recompute the projection images of each kept run even if '
+                             'they already exist.')
     args = parser.parse_args()
-    preprocess_scape_exp(args.exp_folder, batch_size=args.batch_size)
+    preprocess_scape_exp(args.exp_folder, batch_size=args.batch_size, overwrite=args.overwrite)
