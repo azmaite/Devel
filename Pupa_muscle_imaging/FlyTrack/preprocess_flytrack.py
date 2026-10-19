@@ -81,7 +81,8 @@ again with rigid-translation drift correction (see
 corrected images under the usual names, the uncorrected ones with a ``_raw``
 suffix (``median_raw``, ``max_proj_raw``, ...), and the per-frame drift as
 ``shifts`` (plotted in ``drift.png``); the PNGs and activity plot are redone
-from the corrected frames and ``summary_video_motioncorrected.mp4`` is written.
+from the corrected frames, and the corrected ``summary_video.mp4`` is written (the
+uncorrected one from the first run is renamed ``summary_video_raw.mp4``).
 For a single long recording, the analysis-folder outputs are then rebuilt from
 the recordings in the existing ``mkv_paths.json`` (or every processed one).
 

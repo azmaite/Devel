@@ -30,7 +30,9 @@ frame to it (roughly doubling the decode time). The corrected images are saved
 to ``projection_images.h5`` under the usual names, the uncorrected ones with a
 ``_raw`` suffix (``median_raw``, ``max_proj_raw``, ...), and the per-frame drift
 as ``shifts`` (also plotted as ``drift.png``). The corrected preview video is
-``summary_video_motioncorrected.mp4``; the PNGs show the corrected images, with
+``summary_video.mp4`` and the uncorrected one ``summary_video_raw.mp4`` (an
+uncorrected ``summary_video.mp4`` from a first run is renamed to it); the PNGs
+show the corrected images, with
 ``_raw`` versions of them written alongside.
 """
 
@@ -79,7 +81,7 @@ STD_SAVE_NAME = 'std.png'                    # per-recording std image
 MAX_PROJ_SAVE_NAME = 'max_proj.png'          # per-recording max projection
 MIN_PROJ_SAVE_NAME = 'min_proj.png'          # per-recording min projection
 SUMMARY_NAME = 'summary_video.mp4'           # per-recording downsampled preview
-SUMMARY_MC_NAME = 'summary_video_motioncorrected.mp4'  # per-recording, corrected
+SUMMARY_RAW_NAME = 'summary_video_raw.mp4'  # per-recording, uncorrected (after motion correction)
 MKV_PATHS_NAME = 'mkv_paths.json'            # in the analysis folder
 GROUPED_H5_NAME = 'projection_images_grouped.h5'  # in the analysis folder
 CONFIG_NAME = 'config_concatenated.yaml'     # acquisition config, next to each .mkv
@@ -846,13 +848,15 @@ def _process_mkv(mkv_file: str,
 
     If `motion_correct` is True, rigid-translation drift is removed too: the
     video is decoded once to build the uncorrected projections (also writing
-    `summary_video.mp4` if it doesn't exist yet), their median is sharpened into
+    the uncorrected preview video as `summary_video_raw.mp4`, unless it or an
+    uncorrected `summary_video.mp4` from a first run exists; the latter is
+    renamed to `summary_video_raw.mp4`), their median is sharpened into
     a template with `_refine_template()`, and the video is decoded a second time
     to build drift-corrected projections. This roughly doubles the decode time.
     The corrected images are saved under the usual dataset names, the
     uncorrected ones with a `_raw` suffix, and the per-frame drift as `shifts`
     (also plotted as `drift.png`); the corrected preview video is
-    `summary_video_motioncorrected.mp4`, and the activity plot is made from the
+    `summary_video.mp4`, and the activity plot is made from the
     corrected frames.
 
     Parameters
@@ -884,18 +888,24 @@ def _process_mkv(mkv_file: str,
     print('Sampling frames for the summary video contrast...')
     contrast = _video_contrast(mkv_file)
     summary_path = os.path.join(dir, SUMMARY_NAME)
+    raw_summary_path = os.path.join(dir, SUMMARY_RAW_NAME)
 
     if motion_correct:
-        # pass 1: uncorrected projections, which also seed the alignment template
+        # pass 1: uncorrected projections, which also seed the alignment template.
+        # An existing summary_video.mp4 (without a _raw one) is the uncorrected
+        # video of a first run, so it is kept as the _raw one instead of redone.
         print('Motion correction: building uncorrected projections and template...')
-        raw_summary = None if os.path.exists(summary_path) else summary_path
+        raw_summary = None if (os.path.exists(raw_summary_path)
+                               or os.path.exists(summary_path)) else raw_summary_path
         raw = _decode_projections(mkv_file, n_frames,
                                   summary_path=raw_summary, summary_fps=fps,
                                   video_contrast=contrast)
         template = _refine_template(raw.pop('samples'), raw['median'])
+        if not os.path.exists(raw_summary_path):
+            os.replace(summary_path, raw_summary_path)
         # pass 2: align every frame to the sharpened template
         proj = _decode_projections(mkv_file, n_frames, template=template,
-                                   summary_path=os.path.join(dir, SUMMARY_MC_NAME),
+                                   summary_path=summary_path,
                                    summary_fps=fps, video_contrast=contrast)
     else:
         raw = None
