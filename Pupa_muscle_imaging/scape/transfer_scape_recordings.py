@@ -17,10 +17,12 @@ Source layout (as written by the SCAPE / Andor software), e.g.
 Destination layout (same as the rest of /mnt/upramdya_data/MA/SCAPE), e.g.
 
     /mnt/upramdya_data/MA/SCAPE/20261021_xxx/
-        sample1_run1/
-            sample1_run1/                <- everything that was inside the source run folder
-            sample1_run1_info.mat
-            sample1_run1_stim_data.bin
+        sample1_run01_20261021_1641/
+            sample1_run01_20261021_1641/     <- everything that was inside the source run folder
+            sample1_run01_20261021_1641_info.mat
+            sample1_run01_20261021_1641_stim_data.bin
+        sample1_run02_short_20261021_1741/
+        ...
 
 A recording counts as finished when its `_info.mat` and `Spooled files.sifx`
 both exist (these are written last, at the very end of the acquisition)
@@ -32,6 +34,25 @@ md5 checksum) is checked against the source, it is renamed to the final name,
 and only then is the source file deleted. If the script is interrupted it can
 simply be restarted: files already present at the destination with the right
 size are not copied again.
+
+Runs are renumbered on the server. The SCAPE software numbers runs from the
+folders it still sees on the scapepc, so once runs are moved away it reuses
+names (e.g. many `sample1_run1`). Each run is therefore saved as the next free
+zero-padded number for its prefix in the server experiment folder, in the
+order the recordings finish, keeping any suffix, followed by the recording
+start time `_YYYYMMDD_HHMM`: `sample1_run1_short` ->
+`sample1_run01_short_20261021_1630`, the next `sample1_run1` ->
+`sample1_run02_20261021_1641`, etc. The start time is `scanStartTimeApprox`
+from `_info.mat` (needs scipy), or else the creation time of
+`acquisitionmetadata.ini`. The scapepc -> server name mapping is written to
+the log.
+
+A `.transfer_source` marker in the server run folder (written at the start of
+a transfer, removed once the scapepc run folder is gone) identifies which
+recording it holds, so an interrupted transfer resumes into the same folder,
+and files that Solis writes into a run folder after it was moved (e.g.
+`ModifiedData/*locations.dat` when a recording is opened in Solis) are added
+to the right server folder.
 
 Run it in a `tmux`/`screen` session so it survives closing the terminal:
 
@@ -57,7 +78,11 @@ from typing import List, Optional, Union
 
 SRC_ROOT = Path('/mnt/scapepc/MA_scape_data')
 DST_ROOT = Path('/mnt/upramdya_data/MA/SCAPE')
-SIDECAR_SUFFIXES = ['_info.mat', '_stim_data.bin']
+# _info.mat last: its presence marks a run as finished on the scapepc
+SIDECAR_SUFFIXES = ['_stim_data.bin', '_info.mat']
+MARKER = '.transfer_source'
+# sample1_run1_short -> ('sample1_run', '1', '_short')
+RUN_RE = re.compile(r'^(?P<prefix>.*run)(?P<num>\d+)(?P<suffix>.*)$')
 END_MARKER = 'Spooled files.sifx'
 LOG_NAME = 'transfer_log.txt'
 
@@ -201,6 +226,10 @@ def move_file(src: Path,
         dst.parent.mkdir(parents=True, exist_ok=True)
         tmp = dst.with_name(dst.name + '.partial')
         shutil.copyfile(src, tmp)
+        try:  # keep original modification times
+            shutil.copystat(src, tmp)
+        except OSError:
+            pass
         if tmp.stat().st_size != size:
             tmp.unlink()
             raise IOError(f'Size mismatch after copying {src}')
@@ -227,6 +256,106 @@ def remove_empty_dirs(folder: Path) -> None:
             pass
 
 
+def recording_id(src_exp: Path,
+                 run: str) -> str:
+    """
+    Identify a recording by the size and modification time of its `_info.mat`.
+    """
+    st = (src_exp / (run + '_info.mat')).stat()
+    return f'{run} {st.st_size} {int(st.st_mtime)}'
+
+
+def marker_dirs(dst_exp: Path) -> dict:
+    """
+    Map each server run folder holding a `.transfer_source` marker to the
+    recording id stored in it.
+    """
+    out = {}
+    for d in dst_exp.iterdir():
+        marker = d / MARKER
+        if d.is_dir() and marker.is_file():
+            out[d.name] = marker.read_text().strip()
+    return out
+
+
+def start_time(src_exp: Path,
+               run: str) -> datetime:
+    """
+    Return the start time of a recording: `scanStartTimeApprox` from its
+    `_info.mat` if scipy can read it, otherwise the modification time of
+    `acquisitionmetadata.ini` (written when the acquisition starts).
+    """
+    try:
+        from scipy.io import loadmat
+        info = loadmat(src_exp / (run + '_info.mat'), squeeze_me=True,
+                       struct_as_record=False,
+                       variable_names=['info'])['info']
+        return datetime.strptime(str(info.scanStartTimeApprox),
+                                 '%d-%b-%Y %H:%M:%S')
+    except Exception:
+        ini = src_exp / run / 'acquisitionmetadata.ini'
+        if ini.is_file():
+            return datetime.fromtimestamp(ini.stat().st_mtime)
+        return datetime.fromtimestamp(
+            (src_exp / (run + '_info.mat')).stat().st_mtime)
+
+
+def destination_name(src_exp: Path,
+                     dst_exp: Path,
+                     run: str) -> str:
+    """
+    Choose the server name for `run`: the folder already holding an
+    interrupted transfer of this same recording if there is one, otherwise the
+    next free number for its prefix, zero-padded to 2 digits, keeping any
+    suffix and adding the start time (e.g. `sample1_run1_short` ->
+    `sample1_run03_short_20261021_1630` if `sample1_run01...` and
+    `sample1_run02...` exist).
+    """
+    rec_id = recording_id(src_exp, run)
+    for name, marker_id in marker_dirs(dst_exp).items():
+        if marker_id == rec_id:
+            return name
+    stamp = f'{start_time(src_exp, run):%Y%m%d_%H%M}'
+    m = RUN_RE.match(run)
+    if m is None:
+        # Not a '...run<N>...' name: keep it, add the start time
+        name, i = f'{run}_{stamp}', 2
+        while (dst_exp / name).exists():
+            name, i = f'{run}_{stamp}_{i}', i + 1
+        return name
+    prefix, suffix = m['prefix'], m['suffix'] + '_' + stamp
+    pattern = re.compile(rf'^{re.escape(prefix)}(\d{{2,}})(?!\d)')
+    numbers = [int(mm[1]) for d in dst_exp.iterdir()
+               if d.is_dir() and (mm := pattern.match(d.name))]
+    n = max(numbers, default=0) + 1
+    while (dst_exp / f'{prefix}{n:02d}{suffix}').exists():
+        n += 1
+    return f'{prefix}{n:02d}{suffix}'
+
+
+def move_leftovers(src_exp: Path,
+                   dst_exp: Path,
+                   run: str,
+                   name: str,
+                   dry_run: bool) -> None:
+    """
+    Move files that appeared in the scapepc folder of an already transferred
+    run (e.g. Solis' `ModifiedData/<run>locations.dat`) into its server
+    folder `name`, then clear the marker once the scapepc folder is gone.
+    """
+    src_run = src_exp / run
+    dst_data = dst_exp / name / name
+    files = [p for p in src_run.rglob('*') if p.is_file()]
+    log(f'Moving {len(files)} late file(s) of {run} -> {name}: '
+        + ', '.join(str(p.relative_to(src_run)) for p in files))
+    for p in files:
+        move_file(p, dst_data / p.relative_to(src_run), False, dry_run)
+    if not dry_run:
+        remove_empty_dirs(src_run)
+        if not src_run.exists():
+            (dst_exp / name / MARKER).unlink(missing_ok=True)
+
+
 def transfer_run(src_exp: Path,
                  dst_exp: Path,
                  run: str,
@@ -235,12 +364,17 @@ def transfer_run(src_exp: Path,
                  dry_run: bool) -> None:
     """
     Move one finished run from the scapepc to the server, reorganising it as
-    `dst_exp/run/run/<raw files>` plus `dst_exp/run/run_info.mat` and
-    `dst_exp/run/run_stim_data.bin`.
+    `dst_exp/name/name/<raw files>` plus `dst_exp/name/name_info.mat` and
+    `dst_exp/name/name_stim_data.bin`, where `name` is the renumbered run name
+    (see `destination_name()`).
     """
     src_run = src_exp / run
-    dst_run = dst_exp / run
-    dst_data = dst_run / run
+    name = destination_name(src_exp, dst_exp, run)
+    dst_run = dst_exp / name
+    dst_data = dst_run / name
+    if not dry_run:
+        dst_run.mkdir(parents=True, exist_ok=True)
+        (dst_run / MARKER).write_text(recording_id(src_exp, run) + '\n')
 
     jobs = []
     for p in src_run.rglob('*'):
@@ -250,12 +384,12 @@ def transfer_run(src_exp: Path,
             (dst_data / p.relative_to(src_run)).mkdir(parents=True, exist_ok=True)
     # Sidecars last, so a half-transferred run is easy to recognise on the
     # server (it has no _info.mat yet)
-    sidecars = [(src_exp / (run + s), dst_run / (run + s))
+    sidecars = [(src_exp / (run + s), dst_run / (name + s))
                 for s in SIDECAR_SUFFIXES if (src_exp / (run + s)).is_file()]
 
     n_total = len(jobs) + len(sidecars)
     total_bytes = sum(s.stat().st_size for s, _ in jobs + sidecars)
-    log(f'Moving {run}: {n_total} files, {total_bytes / 1e9:.1f} GB '
+    log(f'Moving {run} -> {name}: {n_total} files, {total_bytes / 1e9:.1f} GB '
         f'-> {dst_run}')
     t0 = time.time()
 
@@ -270,10 +404,13 @@ def transfer_run(src_exp: Path,
         (dst_data / 'ModifiedData').mkdir(parents=True, exist_ok=True)
         remove_empty_dirs(src_run)
         if src_run.exists():
-            log(f'  WARNING: {src_run} not empty after transfer, will retry')
+            log(f'  WARNING: {src_run} not empty after transfer, the '
+                f'remaining files will be added to {name} later')
+        else:
+            (dst_run / MARKER).unlink(missing_ok=True)
 
     dt = time.time() - t0
-    log(f'Done {run}: {copied / 1e9:.1f} GB in {dt / 60:.1f} min '
+    log(f'Done {run} -> {name}: {copied / 1e9:.1f} GB in {dt / 60:.1f} min '
         f'({copied / 1e6 / max(dt, 1e-6):.0f} MB/s)')
 
 
@@ -311,6 +448,15 @@ def watch(src_exp: Path,
     while True:
         runs = sorted([p.name for p in src_exp.iterdir() if p.is_dir()],
                       key=natural_key)
+        # Server folders whose scapepc run folder still has leftover files
+        moved = {}  # scapepc run name -> server name
+        for name, marker_id in marker_dirs(dst_exp).items():
+            src_name = marker_id.split()[0]
+            if (src_exp / src_name).is_dir():
+                moved[src_name] = name
+            elif not dry_run:  # scapepc folder gone: transfer is complete
+                (dst_exp / name / MARKER).unlink(missing_ok=True)
+
         for run in runs:
             src_run = src_exp / run
             has_end = ((src_exp / (run + '_info.mat')).is_file()
@@ -320,8 +466,21 @@ def watch(src_exp: Path,
             if not files:
                 # Leftover empty folders (e.g. ModifiedData recreated by
                 # Solis after a run was already moved)
-                if (dst_exp / run).is_dir() and not dry_run:
+                if (time.time() - src_run.stat().st_mtime > settle
+                        and not dry_run):
                     remove_empty_dirs(src_run)
+                continue
+            # Files written after the run was moved: no sidecars and no raw
+            # data (so not a new recording that reuses the name)
+            if (run in moved
+                    and not (src_exp / (run + '_info.mat')).exists()
+                    and not (src_run / 'acquisitionmetadata.ini').exists()
+                    and not any(src_run.glob('*spool.dat'))
+                    and time.time() - snapshot(files)[2] > settle):
+                try:
+                    move_leftovers(src_exp, dst_exp, run, moved[run], dry_run)
+                except Exception as e:
+                    log(f'ERROR moving late files of {run}: {e!r} (will retry)')
                 continue
             if not has_end:
                 if run not in waiting:
