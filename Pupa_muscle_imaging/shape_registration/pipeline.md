@@ -68,7 +68,8 @@
 
    - *Round 1:* the template was the reference hemibody's leg-segment masks. The other five hemibodies were registered to it, and the reference entered the average unchanged.
    - *Round 2:* the template was the round-1 master muscle mask with its leg-segment identities. All six hemibodies, the reference included, were registered to it, so the template shape is the consensus of all animals rather than one animal's.
-   - The round-2 master image and master leg-segment masks form the master reference. New recordings are registered to it with steps 1, 2, 4 and 5, which need no manual labelling.
+   - Further rounds repeat round 2 with the previous round's master mask, until the results converge (three rounds here).
+   - The last round's master image and master leg-segment masks form the master reference. New recordings are registered to it with steps 1, 2, 4 and 5, which need no manual labelling.
    - The coordinate frame (overall pose) remains that of the round-1 reference.
 
 8. **Registering a new recording.**

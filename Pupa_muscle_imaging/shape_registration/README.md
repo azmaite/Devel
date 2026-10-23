@@ -8,7 +8,7 @@ Intensity-based registration (SPAM, see `../SPAM_registration`) does not converg
 
 ### Running it
 
-`python build_master_reference.py` runs all the steps in order, skipping those already done: hemibodies, muscle clusters, then (once the reference's clusters are assigned to leg segments by hand) the registration rounds. The recordings (paths of the `sample#_run#` folders whose minimum projections are used), the reference hemibody and the number of rounds are set at the top of `build_master_reference.py`. If the reference's segment table is missing, it stops and says what to write. Existing cluster labels are never recomputed, as they may have been edited by hand.
+`python build_master_reference.py` runs all the steps in order, skipping those already done: hemibodies, muscle clusters, then (once the reference's clusters are assigned to leg segments by hand) the registration rounds. The recordings (paths of the `sample#_run#` folders whose minimum projections are used), the reference hemibody and the number of rounds are set at the top of `build_master_reference.py`. If the reference's segment table is missing, it stops and says what to write. After the last round, the final master reference is saved directly in `master_reference`: `master_mean.tif` (master image) and `master_segments.tif` (master muscle mask labelled by leg segment, names in `master_segments.json`), on the same grid; these are what new recordings are registered to. Existing cluster labels are never recomputed, as they may have been edited by hand.
 
 ### Registering a new recording
 
