@@ -1,6 +1,13 @@
 """
 Scripts to load and manipulate reference maps (cuticles, muscles, etc.) labelled in webknossos.
 Can be in two formats, labels or meshes.
+
+load_labels: load a webknossos label export as a volume of segment ids (the block of
+    labelled data only, without its offset in the dataset) and the id -> name mapping
+load_labels_in_frame: same, but with the labels placed in the full frame of the dataset
+    they were drawn on, so they line up with the image
+load_segment_group_names: map segment ids to the name of the group (folder) they are in
+load_segment_groups: map segment ids to their enclosing `{leg_id}_{segment}` group
 """
 
 import xml.etree.ElementTree as ET
@@ -53,19 +60,111 @@ def load_labels(labels_dir: Union[str, Path]) -> Tuple[np.ndarray, Dict[int, str
 
     mag_dir = labels_dir / 'data_Volume' / '1'
     dataset = wkw.Dataset.open(str(mag_dir))
-    block_len = dataset.header.block_len
+    offset, shape = _get_labelled_block(mag_dir, dataset.header.block_len)
 
+    label_volume = dataset.read(offset, shape)[0]
+    dataset.close()
+
+    return label_volume, id_to_name
+
+
+def _get_labelled_block(mag_dir: Path, block_len: int) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """
+    Get the offset and shape (both `(x, y, z)`, in voxels) of the block of
+    wkw files that holds all the labels of a magnification folder.
+
+    Parameters
+    ----------
+    mag_dir : Path
+        The `data_Volume/1` folder.
+
+    block_len : int
+        Side length of a wkw block (`dataset.header.block_len`).
+
+    Returns
+    -------
+    offset : tuple of int
+        `(x, y, z)` position of the block's first voxel in the dataset.
+
+    shape : tuple of int
+        `(x, y, z)` size of the block.
+    """
     indices = [
         (int(p.stem[1:]), int(p.parent.name[1:]), int(p.parent.parent.name[1:]))
         for p in mag_dir.glob('z*/y*/x*.wkw')
     ]
     offset = tuple(min(axis) * block_len for axis in zip(*indices))
     shape = tuple((max(axis) - min(axis) + 1) * block_len for axis in zip(*indices))
+    return offset, shape
 
-    label_volume = dataset.read(offset, shape)[0]
+
+def load_labels_in_frame(labels_dir: Union[str, Path],
+                         shape_xyz: Sequence[int]) -> Tuple[np.ndarray, Dict[int, str]]:
+    """
+    Like `load_labels`, but returns the labels placed in the full frame of the
+    dataset they were drawn on, so they line up with the image (`load_labels`
+    only returns the block of wkw files holding labels, without its offset).
+
+    Parameters
+    ----------
+    labels_dir : str or Path
+        Same 'Labels' export folder passed to `load_labels`.
+
+    shape_xyz : sequence of int
+        `(x, y, z)` shape of the dataset the labels were drawn on.
+
+    Returns
+    -------
+    label_volume : np.ndarray
+        3D array of `numpy.uint32` segment ids with shape `shape_xyz`, indexed
+        `[x, y, z]`. Unlabelled voxels are `0`.
+
+    id_to_name : dict of int to str
+        Maps each named segment id to its webknossos name.
+    """
+    labels_dir = Path(labels_dir)
+    block, id_to_name = load_labels(labels_dir)
+    mag_dir = labels_dir / 'data_Volume' / '1'
+    dataset = wkw.Dataset.open(str(mag_dir))
+    offset, _ = _get_labelled_block(mag_dir, dataset.header.block_len)
     dataset.close()
 
-    return label_volume, id_to_name
+    frame = np.zeros(tuple(shape_xyz), dtype=block.dtype)
+    inside = tuple(slice(0, min(size, total - start))
+                   for size, total, start in zip(block.shape, shape_xyz, offset))
+    frame_slices = tuple(slice(start, start + s.stop) for start, s in zip(offset, inside))
+    frame[frame_slices] = block[inside]
+    if np.count_nonzero(frame) != np.count_nonzero(block):
+        raise ValueError(f"Labels in '{labels_dir}' extend outside the given frame "
+                         f"{tuple(shape_xyz)} - is it the dataset they were drawn on?")
+    return frame, id_to_name
+
+
+def load_segment_group_names(labels_dir: Union[str, Path]) -> Dict[int, str]:
+    """
+    Maps each segment id in a webknossos label export to the name of the group
+    (folder) it was put in, whatever that name is (unlike `load_segment_groups`,
+    which only resolves names matching leg/segment combinations).
+
+    Parameters
+    ----------
+    labels_dir : str or Path
+        Same 'Labels' export folder passed to `load_labels`.
+
+    Returns
+    -------
+    dict of int to str
+        Maps segment id to the name of its (innermost) group. Segments in no
+        group are omitted.
+    """
+    nml_path = next(Path(labels_dir).glob('*.nml'))
+    root = ET.parse(nml_path).getroot()
+    group_names = {int(group.attrib['id']): group.attrib['name']
+                   for group in root.findall('volume/groups//group')}
+    segments_elem = root.find('volume/segments')
+    assert segments_elem is not None, f"No <segments> found in '{nml_path}'"
+    return {int(segment.attrib['id']): group_names[int(segment.attrib['groupId'])]
+            for segment in segments_elem if 'groupId' in segment.attrib}
 
 
 def load_segment_groups(labels_dir: Union[str, Path], leg_ids: Sequence[str],
