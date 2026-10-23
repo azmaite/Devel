@@ -62,6 +62,8 @@ Outputs, all on the template grid, as plain tifs that open together in napari at
 - `registration.json`: transforms (target -> template physical coordinates, um, SimpleITK x, y, z
   order), the checks of each segment fit, and the overlap of the registered muscles with the
   template muscles near each segment,
+- `segment_overlap.csv`: that overlap as a table (one row per hemibody, one column per segment;
+  'absent' where a segment was taken as absent), see `write_segment_overlap`,
 - `registration.png`: projections of the master and of each registered hemibody.
 
 Usually run through `build_master_reference.py`, which runs all the rounds. On its own:
@@ -75,6 +77,8 @@ warp_to_template: bring a registered hemibody into the template grid.
 template_from_round: master muscle mask of a finished round, labelled by leg segment.
 segment_weights: blending weights of the segments on a grid.
 segment_map, known_muscles: segment map and muscle mask of a hemibody from its segment table.
+write_segment_overlap: save the per-segment overlap of the registered hemibodies as a csv.
+segment_overlap_from_json: write `segment_overlap.csv` of a finished round from its json.
 """
 
 import argparse
@@ -553,6 +557,47 @@ def warp_to_template(image: np.ndarray,
     return registered.astype(np.float32), valid, (warped_muscles > 0.5) & valid
 
 
+def write_segment_overlap(segment_names: list,
+                          entries: dict,
+                          path: Path) -> None:
+    """
+    Save the overlap of each registered hemibody with the template, per segment, as a csv table:
+    one row per hemibody, one column per segment (Dice of the registered and template muscle
+    masks in the region closest to the segment, or 'absent' if the segment was taken as absent),
+    then the Dice over all segments (`all`) and with the centroid translation only
+    (`centroid_only`, if computed).
+
+    Parameters
+    ----------
+    segment_names : list of str
+        Segment names, in column order.
+    entries : dict
+        Hemibody name -> its entry of `registration.json` (`segments`, `muscle_dice_all`, ...).
+    path : Path
+        Output csv.
+
+    Returns
+    -------
+    None
+    """
+    columns = ['hemibody'] + segment_names + ['all', 'centroid_only']
+    lines = [','.join(columns)]
+    for name, entry in entries.items():
+        values = [name]
+        for segment in segment_names:
+            info = entry['segments'].get(segment, {})
+            if 'absent' in info:
+                values.append('absent')
+            elif 'muscle_dice_near_segment' in info:
+                values.append(f'{info["muscle_dice_near_segment"]:.3f}')
+            else:
+                values.append('')
+        values += [f'{entry[key]:.3f}' if key in entry else ''
+                   for key in ('muscle_dice_all', 'muscle_dice_centroid_only')]
+        lines.append(','.join(values))
+    path.write_text('\n'.join(lines) + '\n')
+
+
 def registration_round(master_path: Path = MASTER_PATH,
                        reference: str = REFERENCE,
                        hemibodies: list = HEMIBODIES,
@@ -651,6 +696,7 @@ def registration_round(master_path: Path = MASTER_PATH,
         print(f'{name}: muscle Dice {entry["muscle_dice_centroid_only"]:.2f} (centroids) -> '
               f'{entry["muscle_dice_all"]:.2f} ({time.time() - start:.0f}s)')
         (out_folder / 'registration.json').write_text(json.dumps(report, indent=1))
+        write_segment_overlap(segment_names, report['targets'], out_folder / 'segment_overlap.csv')
 
     if template_folder is None:
         tifffile.imwrite(out_folder / f'{reference}_registered.tif',
@@ -687,6 +733,27 @@ def registration_round(master_path: Path = MASTER_PATH,
     fig.savefig(out_folder / 'registration.png', dpi=100)
     plt.close(fig)
     print(f'Saved the master and the registered hemibodies to {out_folder}')
+
+
+def segment_overlap_from_json(folder: Path) -> Path:
+    """
+    Write `segment_overlap.csv` of a finished round from its `registration.json` (for rounds run
+    before the table was saved).
+
+    Parameters
+    ----------
+    folder : Path
+        Output folder of the round.
+
+    Returns
+    -------
+    Path
+        Path of the csv.
+    """
+    report = json.loads((folder / 'registration.json').read_text())
+    path = folder / 'segment_overlap.csv'
+    write_segment_overlap(report['segments'], report['targets'], path)
+    return path
 
 
 if __name__ == '__main__':

@@ -32,7 +32,8 @@ Outputs, in `out_folder` (default `{sample#_run#}/analysis/master_registration`)
   order as the projections in `projection_images.h5`, so it overlays `load_proj` arrays; for the
   `.ome.tif` projections, which are (Z, Y, X), use `.transpose(0, 2, 1)`), with
   `master_labels.json` (label names) and `master_labels.png` (labels over the projection),
-- `registration.json`: the fits and their checks.
+- `registration.json`: the fits and their checks, and `segment_overlap.csv`: the overlap of each
+  registered hemibody with the master muscle mask, per segment (as for a registration round).
 
 Run from the terminal: `python register_recording.py sample#_run#_folder [--master_path ...]
 [--label_map labels.tif --label_names names.json]` (see `--help`), or import and call
@@ -166,6 +167,7 @@ def register_recording(recording: str | Path,
     shape = tuple(int(s) for s in np.max([master_shape] + hemibody_shapes, axis=0))
     template_segments, labels = rr._pad(template_segments, shape), rr._pad(labels, shape)
     weights, near, global_weight = rr.segment_weights(template_segments, len(segment_names))
+    nearest_segment = np.argmax(np.stack(weights), axis=0) + 1  # for the per-segment overlap
 
     # 3-4. register each hemibody, bring it into the master frame, and the labels onto it
     report = {'master': str(master_path), 'segments': segment_names, 'hemibodies': {}}
@@ -186,7 +188,14 @@ def register_recording(recording: str | Path,
         tifffile.imwrite(out_folder / f'{name}_{side}_registered_muscles.tif',
                          registered_muscles[crop].astype(np.uint32), compression='zlib')
         entry = fit['entry']
-        entry['muscle_dice_all'] = rr._dice(registered_muscles, (template_segments > 0) & valid)
+        template_muscles = template_segments > 0
+        entry['muscle_dice_all'] = rr._dice(registered_muscles, template_muscles & valid)
+        for index, segment in enumerate(segment_names, start=1):
+            region = (nearest_segment == index) & valid
+            entry['segments'][segment]['muscle_dice_near_segment'] = rr._dice(
+                registered_muscles & region, template_muscles & region)
+        before = rs.warp_labels(muscles.astype(np.uint8), rs.invert_affine(fit['initial'])) > 0
+        entry['muscle_dice_centroid_only'] = rr._dice(before, template_muscles)
         report['hemibodies'][side] = entry
 
         hemibody_labels[side] = labels_to_hemibody(labels, template_segments, fit,
@@ -197,6 +206,9 @@ def register_recording(recording: str | Path,
         print(f'{name}_{side}: muscle Dice with the master {entry["muscle_dice_all"]:.2f} '
               f'({time.time() - start:.0f}s)')
         (out_folder / 'registration.json').write_text(json.dumps(report, indent=1))
+        rr.write_segment_overlap(segment_names, {f'{name}_{s}': e for s, e in
+                                                 report['hemibodies'].items()},
+                                 out_folder / 'segment_overlap.csv')
 
     # labels on the original projection
     split_info = json.loads((hemibody_folder / f'{name}_split.json').read_text())
