@@ -16,9 +16,10 @@ for one recording:
    (`registration_round.warp_to_template`). These registered images can be used to improve the
    master: add the recording to `RECORDINGS` in `build_master_reference.py` and rerun the rounds,
 4. bring the label map back: for each voxel of a hemibody, the master positions given by the
-   segment transforms (target -> master) are averaged with weights that fall off with the
-   distance to each master segment as placed in the hemibody by its own transform (the inverse of
-   the blending of step 3), and the label map is sampled there (nearest label). The hemibody
+   segment transforms (target -> master) are blended as in step 3, but around the master
+   segments as placed in the hemibody by their own transforms (the inverse of the blending of
+   step 3: each segment's own transform inside it, smooth blending in the gaps), and the label
+   map is sampled there (nearest label). The hemibody
    labels are then mapped back through the split (`split_hemibodies.hemibodies_to_original`) onto
    the grid of the original projection.
 
@@ -91,13 +92,14 @@ def labels_to_hemibody(label_map: np.ndarray,
         Labels on the hemibody grid (dtype of `label_map`).
     """
     shape = label_map.shape
-    weights = []
+    # the master segments as placed in the hemibody by their own transforms, and the blending
+    # weights of `registration_round.segment_weights` on them (each segment's own transform
+    # inside it, smooth blending in the gaps)
+    placed = np.zeros(shape, np.uint32)
     for index, transform in enumerate(fit['transforms'], start=1):
-        # the master segment as placed in the hemibody by its own transform
-        placed = rs.warp_labels((template_segments == index).astype(np.uint8), transform) > 0
-        distance = ndi.distance_transform_edt(~placed, sampling=VOXEL_SIZE_UM)
-        weights.append(np.exp(-distance ** 2 / (2 * rr.BLEND_SIGMA_UM ** 2)).astype(np.float32))
-    global_weight = float(np.exp(-rr.GLOBAL_DISTANCE_UM ** 2 / (2 * rr.BLEND_SIGMA_UM ** 2)))
+        mask = rs.warp_labels((template_segments == index).astype(np.uint8), transform) > 0
+        placed[mask & (placed == 0)] = index
+    weights, _, global_weight = rr.segment_weights(placed, len(fit['transforms']))
     (labels,) = rr._warp_blended([label_map], fit['transforms'] + [fit['global_fit']],
                                  weights + [global_weight], shape, order=0)
     return np.where(field_of_view, labels, 0).astype(label_map.dtype)

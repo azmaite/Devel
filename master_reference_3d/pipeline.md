@@ -53,7 +53,7 @@
 
 5. **Deformation and resampling.**
 
-   - The segment transforms of a target were combined into one smooth deformation. For each template voxel, the target positions given by all segment transforms were averaged, weighted by the distance to each template leg-segment mask (Gaussian, σ = 10 µm). The global transform carried a constant weight, equal to that of a segment 30 µm away, so it dominates far from all segments, including the head.
+   - The segment transforms of a target were combined into one deformation. Inside each template leg-segment mask (and within 3 µm of it), the deformation is that segment's own transform, so that no segment is bent by its neighbours. Between segments, the target positions given by the nearby segment transforms were averaged with weights 1/d², d being the distance to each segment's margin, so the deformation goes continuously from one segment's transform to the next across the gaps, where all the bending happens; the global transform carried a constant weight (that of a segment 30 µm away), so it dominates far from all segments, including the head. Where two segments touch, the deformation jumps from one transform to the other.
    - The target image and its muscle mask were sampled once at these positions (linear interpolation; mask threshold 0.5).
    - A target gave no data outside its field of view or within 20 µm of a segment absent from it.
 
@@ -75,5 +75,5 @@
 8. **Registering a new recording.**
 
    - A new recording is prepared and masked as in steps 1–2, and each of its hemibodies is registered to the master muscle mask (with its leg-segment identities) as in step 4.
-   - To analyse the recording without deforming it, labels defined on the master (leg segments, or identified muscles) are brought back onto the recording instead. For each hemibody voxel, the master positions given by the segment transforms are averaged, with weights that fall off with the distance to each master segment as placed in the hemibody by its own transform (Gaussian, σ = 10 µm; the global transform takes over far from all segments). The label map is sampled there (nearest label).
+   - To analyse the recording without deforming it, labels defined on the master (leg segments, or identified muscles) are brought back onto the recording instead. For each hemibody voxel, the master positions given by the segment transforms are averaged, blended as in step 5, around the master segments as placed in the hemibody by their own transforms. The label map is sampled there (nearest label).
    - The hemibody labels are then mapped back through the hemibody split (mirror, rotation and isotropic resampling, inverted) onto the voxel grid of the recording's original minimum projection.

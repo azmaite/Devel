@@ -41,11 +41,15 @@ where the global fit puts it, or if less than `MIN_SEGMENT_IN_VIEW` of the fitte
 the target's field of view, or less than `MIN_SEGMENT_ON_MUSCLE` of that part lies on target
 muscle (e.g. a hind tibia that is not in the image).
 
-The target is then brought into the template grid with one smooth deformation: for each voxel,
-the positions that the segment transforms (and the global one) map it to are averaged, with
-weights that fall off with the distance to each template segment (Gaussian, `BLEND_SIGMA_UM`;
-the global fit takes over far from all segments), and the target is sampled once there. (Blending
-the transformed images instead doubles the edges wherever the transforms differ.) Before
+The target is then brought into the template grid with one deformation (see `segment_weights`):
+inside each template segment (and within `OWN_MARGIN_UM` of it) the segment's own transform, so
+that no segment is bent by its neighbours; between segments, the positions that the nearby
+segment transforms (and the global one, which takes over far from all segments) map each voxel to
+are averaged with inverse-square distance weights, so the deformation goes smoothly from one
+segment's transform to the next across the gaps, and all the bending happens there. The target
+is sampled once at these positions. (Blending the transformed images instead doubles the edges
+wherever the transforms differ.) Where two segments touch, the deformation jumps from one
+transform to the other. Before
 averaging, each image is normalised to 0 at its background (median of the valid voxels outside
 the muscle mask) and 1 at its muscles (median inside). The master is the mean of the normalised
 registered images over the hemibodies that have data at each voxel (zero padding and absent
@@ -79,6 +83,7 @@ segment_weights: blending weights of the segments on a grid.
 segment_map, known_muscles: segment map and muscle mask of a hemibody from its segment table.
 write_segment_overlap: save the per-segment overlap of the registered hemibodies as a csv.
 segment_overlap_from_json: write `segment_overlap.csv` of a finished round from its json.
+rewarp_round: rebuild the registered hemibodies and master of a round from its saved transforms.
 """
 
 import argparse
@@ -111,8 +116,8 @@ MIN_AFFINE_VOXELS = 30000  # smaller segments are fitted rigidly (affine is unst
 MAX_SEGMENT_SHIFT_UM = 30.0  # max distance between segment and global fit at the segment centre
 MIN_SEGMENT_IN_VIEW = 0.2  # min fraction of the fitted segment in the target's field of view
 MIN_SEGMENT_ON_MUSCLE = 0.3  # min fraction of that part on target muscle
-BLEND_SIGMA_UM = 10.0  # fall-off of the segment weights with the distance to the segment
-GLOBAL_DISTANCE_UM = 30.0  # the global fit weighs as much as a segment this far away
+OWN_MARGIN_UM = 3.0  # voxels within this distance of a segment follow its transform only
+GLOBAL_DISTANCE_UM = 30.0  # the global fit weighs as much as a segment this far (beyond its margin)
 ABSENT_DISTANCE_UM = 20.0  # a target gives no data this close to a segment it does not have
 TEMPLATE_SEGMENT_DISTANCE_UM = 10.0  # later rounds: max distance to a previous template segment
 CHUNK_PLANES = 16  # planes of the output grid deformed at a time (memory)
@@ -398,9 +403,14 @@ def template_from_round(folder: Path) -> tuple:
 def segment_weights(segments: np.ndarray,
                     n_segments: int) -> tuple:
     """
-    Blending weights of each segment (Gaussian of the distance to it, `BLEND_SIGMA_UM`), the
-    region near each segment (within `ABSENT_DISTANCE_UM`), and the constant weight of the global
-    fit (that of a segment `GLOBAL_DISTANCE_UM` away).
+    Blending weights of each segment and of the global fit, and the region near each segment
+    (within `ABSENT_DISTANCE_UM`).
+
+    Each voxel within `OWN_MARGIN_UM` of a segment (the nearest one, if several) follows that
+    segment's transform only (weight 1, all the others 0). Every other voxel blends all the
+    segments with weights 1 / d^2, d being its distance to the segment's margin (so the weight of a
+    segment grows to infinity at its margin and the deformation is continuous there), and the
+    global fit with weight 1 / `GLOBAL_DISTANCE_UM`^2 (so it takes over far from all segments).
 
     Parameters
     ----------
@@ -412,14 +422,22 @@ def segment_weights(segments: np.ndarray,
     Returns
     -------
     tuple
-        (list of float32 weight arrays, list of boolean 'near' arrays, global weight).
+        (list of float32 weight arrays, list of boolean 'near' arrays, float32 weight array of
+        the global fit).
     """
+    distance, indices = ndi.distance_transform_edt(segments == 0, sampling=VOXEL_SIZE_UM,
+                                                   return_indices=True)
+    owner = np.where(distance <= OWN_MARGIN_UM, segments[tuple(indices)], 0)
+    del indices
+    outside = owner == 0
     weights, near = [], []
     for index in range(1, n_segments + 1):
         distance = ndi.distance_transform_edt(segments != index, sampling=VOXEL_SIZE_UM)
-        weights.append(np.exp(-distance ** 2 / (2 * BLEND_SIGMA_UM ** 2)).astype(np.float32))
+        gap = np.maximum(distance - OWN_MARGIN_UM, 1e-3)
+        weight = np.where(outside, 1.0 / gap ** 2, (owner == index).astype(np.float32))
+        weights.append(weight.astype(np.float32))
         near.append(distance <= ABSENT_DISTANCE_UM)
-    global_weight = float(np.exp(-GLOBAL_DISTANCE_UM ** 2 / (2 * BLEND_SIGMA_UM ** 2)))
+    global_weight = np.where(outside, 1.0 / GLOBAL_DISTANCE_UM ** 2, 0).astype(np.float32)
     return weights, near, global_weight
 
 
@@ -537,8 +555,8 @@ def warp_to_template(image: np.ndarray,
         Output of `register_hemibody`.
     weights : list
         Segment weights on the template grid (see `segment_weights`).
-    global_weight : float
-        Weight of the global fit.
+    global_weight : float or np.ndarray
+        Weight of the global fit (see `segment_weights`).
 
     Returns
     -------
@@ -596,6 +614,61 @@ def write_segment_overlap(segment_names: list,
                    for key in ('muscle_dice_all', 'muscle_dice_centroid_only')]
         lines.append(','.join(values))
     path.write_text('\n'.join(lines) + '\n')
+
+
+def _save_master(out_folder: Path,
+                 registered: dict,
+                 valid: dict,
+                 template_muscles: np.ndarray) -> None:
+    """
+    Average the registered hemibodies into the master (mean, std, count) and save it, with the
+    overview png (see the module docstring).
+
+    Parameters
+    ----------
+    out_folder : Path
+        Output folder.
+    registered : dict
+        Hemibody name -> normalised registered image.
+    valid : dict
+        Hemibody name -> boolean mask of where it has data.
+    template_muscles : np.ndarray
+        Template muscle mask (drawn on the png).
+
+    Returns
+    -------
+    None
+    """
+    shape = template_muscles.shape
+    count = np.zeros(shape, np.float32)
+    total = np.zeros(shape, np.float64)
+    total_sq = np.zeros(shape, np.float64)
+    for name in registered:
+        values = np.where(valid[name], registered[name], 0)
+        count += valid[name]
+        total += values
+        total_sq += values ** 2
+    mean = np.where(count > 0, total / np.maximum(count, 1), 0)
+    std = np.sqrt(np.maximum(np.where(count > 0, total_sq / np.maximum(count, 1), 0) - mean ** 2,
+                             0))
+    tifffile.imwrite(out_folder / 'master_mean.tif', mean.astype(np.float32))
+    tifffile.imwrite(out_folder / 'master_std.tif', std.astype(np.float32))
+    tifffile.imwrite(out_folder / 'master_count.tif', count)
+
+    names = list(registered)
+    n_columns = (len(names) + 2) // 2
+    fig, axes = plt.subplots(2, n_columns, figsize=(4 * n_columns, 12))
+    for ax in axes.ravel():
+        ax.axis('off')
+    for ax, (title, volume) in zip(axes.ravel(), [('master mean', mean)]
+                                   + [(name, registered[name]) for name in names]):
+        ax.imshow(volume.max(axis=0), cmap='gray', vmin=0, vmax=np.percentile(volume, 99.9))
+        ax.contour(template_muscles.max(axis=0), [0.5], colors='c', linewidths=0.4)
+        ax.set_title(title, fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out_folder / 'registration.png', dpi=100)
+    plt.close(fig)
+    print(f'Saved the master and the registered hemibodies to {out_folder}')
 
 
 def registration_round(master_path: Path = MASTER_PATH,
@@ -704,35 +777,96 @@ def registration_round(master_path: Path = MASTER_PATH,
         tifffile.imwrite(out_folder / f'{reference}_registered_muscles.tif',
                          template_muscles.astype(np.uint32), compression='zlib')
 
-    count = np.zeros(shape, np.float32)
-    total = np.zeros(shape, np.float64)
-    total_sq = np.zeros(shape, np.float64)
-    for name in registered:
-        values = np.where(valid[name], registered[name], 0)
-        count += valid[name]
-        total += values
-        total_sq += values ** 2
-    mean = np.where(count > 0, total / np.maximum(count, 1), 0)
-    std = np.sqrt(np.maximum(np.where(count > 0, total_sq / np.maximum(count, 1), 0) - mean ** 2,
-                             0))
-    tifffile.imwrite(out_folder / 'master_mean.tif', mean.astype(np.float32))
-    tifffile.imwrite(out_folder / 'master_std.tif', std.astype(np.float32))
-    tifffile.imwrite(out_folder / 'master_count.tif', count)
+    _save_master(out_folder, registered, valid, template_muscles)
 
-    names = list(registered)
-    n_columns = (len(names) + 2) // 2
-    fig, axes = plt.subplots(2, n_columns, figsize=(4 * n_columns, 12))
-    for ax in axes.ravel():
-        ax.axis('off')
-    for ax, (title, volume) in zip(axes.ravel(), [('master mean', mean)]
-                                   + [(name, registered[name]) for name in names]):
-        ax.imshow(volume.max(axis=0), cmap='gray', vmin=0, vmax=np.percentile(volume, 99.9))
-        ax.contour(template_muscles.max(axis=0), [0.5], colors='c', linewidths=0.4)
-        ax.set_title(title, fontsize=7)
-    fig.tight_layout()
-    fig.savefig(out_folder / 'registration.png', dpi=100)
-    plt.close(fig)
-    print(f'Saved the master and the registered hemibodies to {out_folder}')
+
+def _affine_from_dict(entry: dict) -> sitk.AffineTransform:
+    """
+    Affine transform from its `_affine_dict` (as saved in `registration.json`).
+
+    Parameters
+    ----------
+    entry : dict
+        `matrix` and `translation`.
+
+    Returns
+    -------
+    sitk.AffineTransform
+        The transform.
+    """
+    transform = sitk.AffineTransform(3)
+    transform.SetMatrix(np.ravel(entry['matrix']).tolist())
+    transform.SetTranslation(list(entry['translation']))
+    return transform
+
+
+def rewarp_round(folder: Path,
+                 master_path: Path = MASTER_PATH,
+                 reference: Optional[str] = None) -> None:
+    """
+    Rebuild the registered hemibodies and the master of a finished round from the transforms
+    saved in its `registration.json`, without fitting again (e.g. after a change of the blending,
+    `segment_weights`). The overlaps in `registration.json` and `segment_overlap.csv` are
+    recomputed.
+
+    Parameters
+    ----------
+    folder : Path
+        Output folder of the round (relative paths are taken in `master_path`).
+    master_path : Path
+        Folder holding `segment_masks`.
+    reference : str or None
+        Round 1 only: the reference hemibody, which entered the average as is (default:
+        `REFERENCE`). Ignored for later rounds.
+
+    Returns
+    -------
+    None
+    """
+    folder = master_path / folder
+    in_folder = master_path / 'segment_masks'
+    report = json.loads((folder / 'registration.json').read_text())
+    segment_names = report['segments']
+    template_segments = tifffile.imread(folder / 'reference_segments.tif').astype(np.uint32)
+    shape = template_segments.shape
+    template_muscles = template_segments > 0
+    weights, near, global_weight = segment_weights(template_segments, len(segment_names))
+    nearest_segment = np.argmax(np.stack(weights), axis=0) + 1
+    registered, valid = {}, {}
+    round_one = not report['template'].startswith('consensus of')
+    if round_one:
+        reference = reference or REFERENCE
+        image = _pad(tifffile.imread(in_folder / f'{reference}_image.tif').astype(np.float32), shape)
+        components = _pad(tifffile.imread(in_folder / f'{reference}_components.tif'), shape)
+        registered[reference] = _normalise(image, components > 0)
+        valid[reference] = image > 0
+    for name, entry in report['targets'].items():
+        image = _pad(tifffile.imread(in_folder / f'{name}_image.tif').astype(np.float32), shape)
+        components = _pad(tifffile.imread(in_folder / f'{name}_components.tif'), shape)
+        muscles = known_muscles(components, {})
+        absent = np.zeros(shape, bool)
+        for index, segment in enumerate(segment_names, start=1):
+            if 'absent' in entry['segments'][segment]:
+                absent |= near[index - 1]
+        fit = {'transforms': [_affine_from_dict(entry['segments'][s]) for s in segment_names],
+               'global_fit': _affine_from_dict(entry['global']), 'absent': absent}
+        registered[name], valid[name], registered_muscles = warp_to_template(
+            image, muscles, components > 0, fit, weights, global_weight)
+        tifffile.imwrite(folder / f'{name}_registered.tif', registered[name])
+        tifffile.imwrite(folder / f'{name}_registered_muscles.tif',
+                         registered_muscles.astype(np.uint32), compression='zlib')
+        entry['muscle_dice_all'] = _dice(registered_muscles, template_muscles & valid[name])
+        for index, segment in enumerate(segment_names, start=1):
+            region = (nearest_segment == index) & valid[name]
+            entry['segments'][segment]['muscle_dice_near_segment'] = _dice(
+                registered_muscles & region, template_muscles & region)
+        print(f'{name}: rewarped, muscle Dice {entry["muscle_dice_all"]:.3f}')
+    report['blending'] = 'own transform inside segments, inverse-square blending in the gaps'
+    (folder / 'registration.json').write_text(json.dumps(report, indent=1))
+    write_segment_overlap(segment_names, report['targets'], folder / 'segment_overlap.csv')
+    if round_one:
+        tifffile.imwrite(folder / f'{reference}_registered.tif', registered[reference])
+    _save_master(folder, registered, valid, template_muscles)
 
 
 def segment_overlap_from_json(folder: Path) -> Path:
@@ -768,6 +902,12 @@ if __name__ == '__main__':
                              'reference hemibody as the template).')
     parser.add_argument('--out_folder', type=Path, default=None,
                         help='Output folder (default: registered_hemibodies).')
+    parser.add_argument('--rewarp', type=Path, default=None,
+                        help='Only rebuild the registered hemibodies and the master of this '
+                             'finished round from its saved transforms (no fitting).')
     args = parser.parse_args()
-    registration_round(args.master_path, args.reference, args.hemibodies,
-                       args.template_folder, args.out_folder)
+    if args.rewarp is not None:
+        rewarp_round(args.rewarp, args.master_path, args.reference)
+    else:
+        registration_round(args.master_path, args.reference, args.hemibodies,
+                           args.template_folder, args.out_folder)
