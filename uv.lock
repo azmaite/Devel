@@ -359,7 +359,7 @@ wheels = [
 [[package]]
 name = "devel"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "av" },
     { name = "h5py" },
