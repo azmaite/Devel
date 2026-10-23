@@ -1,7 +1,7 @@
 # master_reference_3d
 
 Pipelines 4-6 (run with the conda environment `scapeio`):
-- 4: build the master reference, a master 3D image and muscle mask labelled by leg segment, from several SCAPE recordings (`build_master_reference.py`); later it will hold a map of identified muscles and be registered to the CT-scan labels (`ct_scan/`),
+- 4: build the master reference, a master 3D image and muscle mask labelled by leg segment, from several SCAPE recordings (`build_master_reference.py`), and register the CT-scan muscle labels to it to get a map of identified muscles (`register_ct_labels.py`),
 - 5: register a 3D video to the master, and map the master's labels back onto it (`register_recording.py`),
 - 6 (planned): extract the time trace of each label from the 3D video, with the labels mapped onto it.
 
@@ -26,5 +26,6 @@ Intensity-based registration (SPAM, tried before and since removed) does not con
 - `registration_round.py`: one registration round: registers all hemibodies to a template, one leg segment at a time (the head gets no fit of its own), blends the segment transforms into one smooth deformation, and averages the normalised registered images into a master image and majority-vote muscle mask. Round 1 uses the labelled reference hemibody as the template (`master_reference/registered_hemibodies`); later rounds use the master muscle mask of the previous round (`master_reference/registered_hemibodies_round2`, ...). Run by `build_master_reference.py`.
 - `register_recording.py`: registers a new recording to the master and brings a master label map back onto it (see above).
 - `auto_segment_muscles.py`: the automatic muscle mask and its splitting into individual muscles (in progress; the mask part is what `muscle_mask.py` copies).
+- `register_ct_labels.py`: registers the muscle labels of the CT scan (`ct_scan/export_ct_muscles.py`) to the final master, leg segment by leg segment (only the CT muscles visible in SCAPE for the coxa/thorax segments, listed in `SEGMENT_MUSCLES`), and maps them onto the master: `master_reference/ct_alignment/master_muscle_map.tif`, the master muscle map with the identity of each muscle.
 - `muscle_mask.py`: the automatic muscle mask (log-contrast to the local background, hysteresis threshold, removal of small or non-elongated components), copied from the mask part of `auto_segment_muscles.py`.
 - `register_segments.py`: the registration itself (signed distance maps of the masks, fit restricted to the inside of the template segment, target field of view handled as unknown; rigid then affine), used by `registration_round.py`.
