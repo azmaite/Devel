@@ -70,3 +70,9 @@
    - *Round 2:* the template was the round-1 master muscle mask with its leg-segment identities. All six hemibodies, the reference included, were registered to it, so the template shape is the consensus of all animals rather than one animal's.
    - The round-2 master image and master leg-segment masks form the master reference. New recordings are registered to it with steps 1, 2, 4 and 5, which need no manual labelling.
    - The coordinate frame (overall pose) remains that of the round-1 reference.
+
+8. **Registering a new recording.**
+
+   - A new recording is prepared and masked as in steps 1–2, and each of its hemibodies is registered to the master muscle mask (with its leg-segment identities) as in step 4.
+   - To analyse the recording without deforming it, labels defined on the master (leg segments, or identified muscles) are brought back onto the recording instead. For each hemibody voxel, the master positions given by the segment transforms are averaged, with weights that fall off with the distance to each master segment as placed in the hemibody by its own transform (Gaussian, σ = 10 µm; the global transform takes over far from all segments). The label map is sampled there (nearest label).
+   - The hemibody labels are then mapped back through the hemibody split (mirror, rotation and isotropic resampling, inverted) onto the voxel grid of the recording's original minimum projection.

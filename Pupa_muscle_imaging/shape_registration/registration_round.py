@@ -70,6 +70,11 @@ Usually run through `build_master_reference.py`, which runs all the rounds. On i
 registered_hemibodies_round2` (see `--help`).
 
 registration_round: run one round.
+register_hemibody: register one hemibody to a template (global, then per-segment fits).
+warp_to_template: bring a registered hemibody into the template grid.
+template_from_round: master muscle mask of a finished round, labelled by leg segment.
+segment_weights: blending weights of the segments on a grid.
+segment_map, known_muscles: segment map and muscle mask of a hemibody from its segment table.
 """
 
 import argparse
@@ -166,7 +171,8 @@ def _matrix_offset(transform: sitk.Transform) -> tuple:
 def _warp_blended(arrays: list,
                   transforms: list,
                   weights: list,
-                  shape: tuple) -> list:
+                  shape: tuple,
+                  order: int = 1) -> list:
     """
     Bring target arrays into the template grid with a blend of affine transforms.
 
@@ -183,15 +189,17 @@ def _warp_blended(arrays: list,
     weights : list
         Weight of each transform on the template grid: arrays of shape `shape` or scalars.
     shape : tuple of int
-        Shape of the template grid (and of the arrays).
+        Shape of the output grid.
+    order : int
+        Interpolation order (1: linear, for images; 0: nearest, for labels).
 
     Returns
     -------
     list of np.ndarray
-        Float32 warped arrays, shape `shape`.
+        Warped arrays, shape `shape` (float32, or the arrays' dtype for `order` 0).
     """
     matrices = [_matrix_offset(transform) for transform in transforms]
-    outputs = [np.zeros(shape, np.float32) for _ in arrays]
+    outputs = [np.zeros(shape, array.dtype if order == 0 else np.float32) for array in arrays]
     y, x = np.meshgrid(np.arange(shape[1]), np.arange(shape[2]), indexing='ij')
     for start in range(0, shape[0], CHUNK_PLANES):
         stop = min(start + CHUNK_PLANES, shape[0])
@@ -209,8 +217,8 @@ def _warp_blended(arrays: list,
         # target array indices (z, y, x)
         coordinates = np.moveaxis(position[..., ::-1] / VOXEL_SIZE_UM, -1, 0)
         for array, output in zip(arrays, outputs):
-            output[start:stop] = ndi.map_coordinates(array, coordinates, order=1, mode='constant',
-                                                     cval=0.0)
+            output[start:stop] = ndi.map_coordinates(array, coordinates, order=order,
+                                                     mode='constant', cval=0)
     return outputs
 
 
@@ -300,20 +308,72 @@ def _load_segment_tables(folder: Path) -> tuple:
     return tables, names
 
 
-def _template_from_previous_round(folder: Path) -> tuple:
+def segment_map(components: np.ndarray,
+                table: dict,
+                segment_names: list) -> np.ndarray:
     """
-    Template of a later round: consensus muscle mask of a previous round, labelled by the
-    previous template's segments (see the module docstring).
+    Segment of each voxel of a labelled muscle mask, from a segment table.
+
+    Parameters
+    ----------
+    components : np.ndarray
+        Muscle clusters (integer labels).
+    table : dict
+        Segment name -> list of cluster labels.
+    segment_names : list of str
+        Segments to number, in order (1..); others (e.g. the ignored ones) and unlisted labels
+        are 0.
+
+    Returns
+    -------
+    np.ndarray
+        uint32 segment map.
+    """
+    lookup = np.zeros(int(components.max()) + 1, dtype=np.uint32)
+    for index, segment in enumerate(segment_names, start=1):
+        labels = [label for label in table.get(segment, []) if label < lookup.size]
+        lookup[labels] = index
+    return lookup[components]
+
+
+def known_muscles(components: np.ndarray,
+                  table: dict) -> np.ndarray:
+    """
+    Muscle mask without the clusters of the ignored segments (where a segment table is given).
+
+    Parameters
+    ----------
+    components : np.ndarray
+        Muscle clusters (integer labels).
+    table : dict
+        Segment name -> list of cluster labels ({} if unknown).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask.
+    """
+    ignored = sum((table.get(s, []) for s in IGNORED_SEGMENTS), [])
+    return (components > 0) & ~np.isin(components, ignored)
+
+
+def template_from_round(folder: Path) -> tuple:
+    """
+    Master muscle mask of a finished round, labelled by leg segment: the consensus of its
+    registered muscle masks (muscle where at least half of the hemibodies that cover a voxel have
+    muscle), each voxel labelled with the segment of the round's template within
+    `TEMPLATE_SEGMENT_DISTANCE_UM` (else unlabelled, e.g. the head). It is the template of the next
+    round, and what new recordings are registered to (`register_recording.py`).
 
     Parameters
     ----------
     folder : Path
-        Output folder of the previous round.
+        Output folder of the round.
 
     Returns
     -------
     tuple
-        (segment map, uint32; list of segment names).
+        (segment map, uint32, on the round's grid; list of segment names, in label order).
     """
     previous = tifffile.imread(folder / 'reference_segments.tif')
     names = json.loads((folder / 'reference_segments.json').read_text())['id_to_name']
@@ -328,6 +388,168 @@ def _template_from_previous_round(folder: Path) -> tuple:
     nearest = previous[tuple(indices)]
     segments = np.where(consensus & (distance <= TEMPLATE_SEGMENT_DISTANCE_UM), nearest, 0)
     return segments.astype(np.uint32), segment_names
+
+
+def segment_weights(segments: np.ndarray,
+                    n_segments: int) -> tuple:
+    """
+    Blending weights of each segment (Gaussian of the distance to it, `BLEND_SIGMA_UM`), the
+    region near each segment (within `ABSENT_DISTANCE_UM`), and the constant weight of the global
+    fit (that of a segment `GLOBAL_DISTANCE_UM` away).
+
+    Parameters
+    ----------
+    segments : np.ndarray
+        Segment map (1..`n_segments`, 0 elsewhere).
+    n_segments : int
+        Number of segments.
+
+    Returns
+    -------
+    tuple
+        (list of float32 weight arrays, list of boolean 'near' arrays, global weight).
+    """
+    weights, near = [], []
+    for index in range(1, n_segments + 1):
+        distance = ndi.distance_transform_edt(segments != index, sampling=VOXEL_SIZE_UM)
+        weights.append(np.exp(-distance ** 2 / (2 * BLEND_SIGMA_UM ** 2)).astype(np.float32))
+        near.append(distance <= ABSENT_DISTANCE_UM)
+    global_weight = float(np.exp(-GLOBAL_DISTANCE_UM ** 2 / (2 * BLEND_SIGMA_UM ** 2)))
+    return weights, near, global_weight
+
+
+def register_hemibody(template_segments: np.ndarray,
+                      segment_names: list,
+                      image: np.ndarray,
+                      muscles: np.ndarray,
+                      near: list,
+                      target_segments: Optional[np.ndarray] = None,
+                      label: str = '') -> dict:
+    """
+    Register one hemibody (the target) to the template (steps 1-3 of the module docstring).
+
+    Parameters
+    ----------
+    template_segments : np.ndarray
+        Template segment map (1.. in the order of `segment_names`).
+    segment_names : list of str
+        Names of the template segments.
+    image : np.ndarray
+        Target image, same shape as `template_segments` (padded; 0 = outside the field of view).
+    muscles : np.ndarray
+        Target muscle mask, same shape.
+    near : list of np.ndarray
+        Region near each template segment (see `segment_weights`).
+    target_segments : np.ndarray or None
+        Segment map of the target (same numbering), to fit each segment to the same segment of
+        the target only (see `USE_TARGET_SEGMENTS`); a segment absent from it is taken as absent.
+        None: each segment is fitted to all of `muscles`.
+    label : str
+        Name printed in the progress messages.
+
+    Returns
+    -------
+    dict
+        `global_fit` and `transforms` (one per segment; target -> template physical
+        coordinates, the global fit for absent segments), `absent` (boolean mask, on the
+        template grid, of where the target gives no data), `initial` (centroid translation) and
+        `entry` (the fit checks, for json).
+    """
+    start = time.time()
+    template_muscles = template_segments > 0
+    field_of_view = image > 0
+    shift = _physical_centroid(template_muscles) - _physical_centroid(muscles)
+    initial = sitk.TranslationTransform(3, shift.tolist())
+    global_fit = rs.register_segment_shape(template_muscles, muscles, model='affine',
+                                           initial=initial, clip_um=45.0,
+                                           target_valid=field_of_view)
+    entry = {'labelled_segments': target_segments is not None,
+             'global': _affine_dict(global_fit), 'segments': {}}
+    print(f'{label}: global fit done ({time.time() - start:.0f}s)')
+
+    transforms, absent = [], np.zeros(template_segments.shape, bool)
+    for index, segment in enumerate(segment_names, start=1):
+        segment_muscles = template_segments == index
+        info = {}
+        if target_segments is not None and not (target_segments == index).any():
+            fit, info['absent'] = global_fit, 'not in the segment table'
+        else:
+            target_mask = (target_segments == index) if target_segments is not None else muscles
+            model = 'affine' if segment_muscles.sum() >= MIN_AFFINE_VOXELS else 'rigid'
+            fit = rs.register_segment_shape(segment_muscles, target_mask, model=model,
+                                            initial=global_fit, target_valid=field_of_view)
+            centre = tuple(_physical_centroid(segment_muscles))
+            shift_um = float(np.linalg.norm(np.subtract(
+                rs.invert_affine(fit).TransformPoint(centre),
+                rs.invert_affine(global_fit).TransformPoint(centre))))
+            # where the fitted segment lands in the target (on the target grid)
+            landed = rs.warp_labels(segment_muscles.astype(np.uint8), fit) > 0
+            in_view = float((landed & field_of_view).sum() / max(landed.sum(), 1))
+            on_muscle = float((landed & field_of_view & target_mask).sum()
+                              / max((landed & field_of_view).sum(), 1))
+            info.update({'model': model, 'shift_from_global_um': shift_um,
+                         'fraction_in_view': in_view, 'fraction_on_muscle': on_muscle})
+            if shift_um > MAX_SEGMENT_SHIFT_UM:
+                info['absent'] = 'fit ran away from the global fit'
+            elif in_view < MIN_SEGMENT_IN_VIEW:
+                info['absent'] = 'out of the field of view'
+            elif on_muscle < MIN_SEGMENT_ON_MUSCLE:
+                info['absent'] = 'not on target muscle'
+            if 'absent' in info:
+                fit = global_fit
+        if 'absent' in info:
+            absent |= near[index - 1]
+        transforms.append(fit)
+        entry['segments'][segment] = {**info, **_affine_dict(fit)}
+        print(f'  {segment}: ' + (f'{info["model"]}, {info["shift_from_global_um"]:.1f} um '
+                                  f'from global, {info["fraction_in_view"]:.2f} in view, '
+                                  f'{info["fraction_on_muscle"]:.2f} on muscle'
+                                  if 'model' in info else '')
+              + (f' -> ABSENT ({info["absent"]})' if 'absent' in info else ''))
+    return {'global_fit': global_fit, 'transforms': transforms, 'absent': absent,
+            'initial': initial, 'entry': entry}
+
+
+def warp_to_template(image: np.ndarray,
+                     muscles: np.ndarray,
+                     all_muscles: np.ndarray,
+                     fit: dict,
+                     weights: list,
+                     global_weight: float) -> tuple:
+    """
+    Bring a registered hemibody into the template grid with one blended deformation (step 4 of
+    the module docstring).
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Target image (padded to the template grid; 0 = outside the field of view).
+    muscles : np.ndarray
+        Target muscle mask used for the fits.
+    all_muscles : np.ndarray
+        Target muscle mask used for the normalisation (all clusters).
+    fit : dict
+        Output of `register_hemibody`.
+    weights : list
+        Segment weights on the template grid (see `segment_weights`).
+    global_weight : float
+        Weight of the global fit.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        (normalised registered image, 0 where there is no data; boolean mask of where there is
+        data; registered muscle mask).
+    """
+    shape = image.shape
+    warped_image, warped_view, warped_muscles = _warp_blended(
+        [_normalise(image, all_muscles), (image > 0).astype(np.float32),
+         muscles.astype(np.float32)],
+        [rs.invert_affine(t) for t in fit['transforms'] + [fit['global_fit']]],
+        weights + [global_weight], shape)
+    valid = (warped_view > 0.5) & ~fit['absent']
+    registered = np.where(valid, warped_image / np.maximum(warped_view, 1e-6), 0)
+    return registered.astype(np.float32), valid, (warped_muscles > 0.5) & valid
 
 
 def registration_round(master_path: Path = MASTER_PATH,
@@ -377,29 +599,15 @@ def registration_round(master_path: Path = MASTER_PATH,
         template_name = reference
     else:
         template_folder = master_path / template_folder
-        template_segments, segment_names = _template_from_previous_round(template_folder)
+        template_segments, segment_names = template_from_round(template_folder)
         shape = template_segments.shape
         targets = [reference] + list(hemibodies)
         template_name = f'consensus of {template_folder.name}'
     print(f'Template: {template_name}; grid {shape}')
 
-    def segment_map(components: np.ndarray, table: dict) -> np.ndarray:
-        # segment index (1..) of each voxel, in the order of `segment_names`; ignored and
-        # unlisted labels -> 0
-        lookup = np.zeros(int(components.max()) + 1, dtype=np.uint32)
-        for index, segment in enumerate(segment_names, start=1):
-            labels = [label for label in table.get(segment, []) if label < lookup.size]
-            lookup[labels] = index
-        return lookup[components]
-
-    def known_muscles(components: np.ndarray, table: dict) -> np.ndarray:
-        # all muscles except those of the ignored segments
-        ignored = sum((table.get(s, []) for s in IGNORED_SEGMENTS), [])
-        return (components > 0) & ~np.isin(components, ignored)
-
     if template_folder is None:
         reference_image, reference_components = map(lambda a: _pad(a, shape), load(reference))
-        template_segments = segment_map(reference_components, tables[reference])
+        template_segments = segment_map(reference_components, tables[reference], segment_names)
         registered[reference] = _normalise(reference_image, reference_components > 0)
         valid[reference] = reference_image > 0
     template_muscles = template_segments > 0
@@ -409,96 +617,34 @@ def registration_round(master_path: Path = MASTER_PATH,
         {'template': template_name, 'grid_shape': list(shape), 'voxel_size_um': VOXEL_SIZE_UM,
          'id_to_name': {i: name for i, name in enumerate(segment_names, start=1)}}, indent=1))
 
-    # blending weights of each segment on the template grid (Gaussian of the distance to it)
     print('Computing blending weights...')
-    weights, near = [], []
-    for index in range(1, len(segment_names) + 1):
-        distance = ndi.distance_transform_edt(template_segments != index, sampling=VOXEL_SIZE_UM)
-        weights.append(np.exp(-distance ** 2 / (2 * BLEND_SIGMA_UM ** 2)).astype(np.float32))
-        near.append(distance <= ABSENT_DISTANCE_UM)
-    global_weight = float(np.exp(-GLOBAL_DISTANCE_UM ** 2 / (2 * BLEND_SIGMA_UM ** 2)))
+    weights, near, global_weight = segment_weights(template_segments, len(segment_names))
     nearest_segment = np.argmax(np.stack(weights), axis=0) + 1  # for the per-segment overlap
 
     report = {'template': template_name, 'segments': segment_names, 'targets': {}}
     for name in targets:
         start = time.time()
         image, components = map(lambda a: _pad(a, shape), load(name))
-        field_of_view = image > 0
         table = tables.get(name) if USE_TARGET_SEGMENTS else None
-        target_segments = segment_map(components, table) if table is not None else None
+        target_segments = (segment_map(components, table, segment_names)
+                           if table is not None else None)
         muscles = known_muscles(components, table or {})
-
-        shift = _physical_centroid(template_muscles) - _physical_centroid(muscles)
-        initial = sitk.TranslationTransform(3, shift.tolist())
-        global_fit = rs.register_segment_shape(template_muscles, muscles, model='affine',
-                                               initial=initial, clip_um=45.0,
-                                               target_valid=field_of_view)
-        entry = {'labelled_segments': table is not None, 'global': _affine_dict(global_fit),
-                 'segments': {}}
-        print(f'{name}: global fit done ({time.time() - start:.0f}s)')
-
-        transforms, absent = [], np.zeros(shape, bool)
-        for index, segment in enumerate(segment_names, start=1):
-            segment_muscles = template_segments == index
-            info = {}
-            if table is not None and not table.get(segment):
-                fit, info['absent'] = global_fit, 'not in the segment table'
-            else:
-                target_mask = (target_segments == index) if table is not None else muscles
-                model = 'affine' if segment_muscles.sum() >= MIN_AFFINE_VOXELS else 'rigid'
-                fit = rs.register_segment_shape(segment_muscles, target_mask, model=model,
-                                                initial=global_fit, target_valid=field_of_view)
-                centre = tuple(_physical_centroid(segment_muscles))
-                shift_um = float(np.linalg.norm(np.subtract(
-                    rs.invert_affine(fit).TransformPoint(centre),
-                    rs.invert_affine(global_fit).TransformPoint(centre))))
-                # where the fitted segment lands in the target (on the target grid)
-                landed = rs.warp_labels(segment_muscles.astype(np.uint8), fit) > 0
-                in_view = float((landed & field_of_view).sum() / max(landed.sum(), 1))
-                on_muscle = float((landed & field_of_view & target_mask).sum()
-                                  / max((landed & field_of_view).sum(), 1))
-                info.update({'model': model, 'shift_from_global_um': shift_um,
-                             'fraction_in_view': in_view, 'fraction_on_muscle': on_muscle})
-                if shift_um > MAX_SEGMENT_SHIFT_UM:
-                    info['absent'] = 'fit ran away from the global fit'
-                elif in_view < MIN_SEGMENT_IN_VIEW:
-                    info['absent'] = 'out of the field of view'
-                elif on_muscle < MIN_SEGMENT_ON_MUSCLE:
-                    info['absent'] = 'not on target muscle'
-                if 'absent' in info:
-                    fit = global_fit
-            if 'absent' in info:
-                absent |= near[index - 1]
-            transforms.append(fit)
-            entry['segments'][segment] = {**info, **_affine_dict(fit)}
-            print(f'  {segment}: ' + (f'{info["model"]}, {info["shift_from_global_um"]:.1f} um '
-                                      f'from global, {info["fraction_in_view"]:.2f} in view, '
-                                      f'{info["fraction_on_muscle"]:.2f} on muscle'
-                                      if 'model' in info else '')
-                  + (f' -> ABSENT ({info["absent"]})' if 'absent' in info else ''))
-
-        # bring the target into the template grid with one blended deformation
-        warped_image, warped_view, warped_muscles = _warp_blended(
-            [_normalise(image, components > 0), field_of_view.astype(np.float32),
-             muscles.astype(np.float32)],
-            [rs.invert_affine(t) for t in transforms + [global_fit]],
-            weights + [global_weight], shape)
-        valid_target = (warped_view > 0.5) & ~absent
-        registered[name] = np.where(valid_target, warped_image / np.maximum(warped_view, 1e-6), 0)
-        valid[name] = valid_target
-        registered_muscles = (warped_muscles > 0.5) & valid_target
-        tifffile.imwrite(out_folder / f'{name}_registered.tif',
-                         registered[name].astype(np.float32))
+        fit = register_hemibody(template_segments, segment_names, image, muscles, near,
+                                target_segments, name)
+        registered[name], valid[name], registered_muscles = warp_to_template(
+            image, muscles, components > 0, fit, weights, global_weight)
+        tifffile.imwrite(out_folder / f'{name}_registered.tif', registered[name])
         tifffile.imwrite(out_folder / f'{name}_registered_muscles.tif',
                          registered_muscles.astype(np.uint32), compression='zlib')
 
         # overlap with the template muscles, in the region closest to each segment
-        entry['muscle_dice_all'] = _dice(registered_muscles, template_muscles & valid_target)
+        entry = fit['entry']
+        entry['muscle_dice_all'] = _dice(registered_muscles, template_muscles & valid[name])
         for index, segment in enumerate(segment_names, start=1):
-            region = (nearest_segment == index) & valid_target
+            region = (nearest_segment == index) & valid[name]
             entry['segments'][segment]['muscle_dice_near_segment'] = _dice(
                 registered_muscles & region, template_muscles & region)
-        before = rs.warp_labels(muscles.astype(np.uint8), rs.invert_affine(initial)) > 0
+        before = rs.warp_labels(muscles.astype(np.uint8), rs.invert_affine(fit['initial'])) > 0
         entry['muscle_dice_centroid_only'] = _dice(before, template_muscles)
         report['targets'][name] = entry
         print(f'{name}: muscle Dice {entry["muscle_dice_centroid_only"]:.2f} (centroids) -> '

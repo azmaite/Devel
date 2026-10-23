@@ -23,6 +23,8 @@ resample_to_isotropic: resample a (Z, X, Y) volume to isotropic voxels.
 fit_symmetry_plane: fit the mirror-symmetry plane of an isotropic volume.
 mirror_volume: reflect a volume across a fitted plane.
 split_hemibodies: rotate a volume to its plane and split it into the two hemibodies.
+hemibodies_to_original: bring hemibody volumes (e.g. labels) back to the original projection's
+    frame.
 split_recording: do all of the above for one recording folder and save the results.
 """
 
@@ -35,6 +37,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
+import scipy.ndimage as ndi
 from scipy.ndimage import affine_transform, zoom
 from scipy.optimize import minimize
 
@@ -190,6 +193,51 @@ def fit_symmetry_plane(volume: np.ndarray,
     return float(theta_1), float(theta_2), float(offset_axis2 / downsample_factor), -result.fun
 
 
+def _split_geometry(shape: tuple,
+                    theta_1: float,
+                    theta_2: float,
+                    offset_axis2: float) -> tuple:
+    """
+    Geometry of `split_hemibodies`: the rotation that takes the plane's normal onto axis 2, about
+    the plane's crossing with the axis-0/axis-1 centre line, and the grid that holds the whole
+    rotated volume.
+
+    A point `p` of the volume (array indices) goes to `rotation @ (p - center_in) + center_out` in
+    the rotated grid, which is split at axis-2 index `split_index`.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        Shape of the (isotropic) volume.
+    theta_1, theta_2, offset_axis2 : float
+        The plane (see `fit_symmetry_plane`).
+
+    Returns
+    -------
+    tuple
+        (`rotation` (3 x 3), `center_in`, `center_out`, `out_shape` of the rotated grid,
+        `split_index`).
+    """
+    normal = _plane_normal(theta_1, theta_2)
+    axis2 = np.array([0.0, 0.0, 1.0])
+    v = np.cross(normal, axis2)
+    s, c = np.linalg.norm(v), normal @ axis2
+    if s < 1e-12:
+        rotation = np.eye(3)
+    else:
+        vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        rotation = np.eye(3) + vx + vx @ vx * (1 - c) / s ** 2
+    center_in = np.array([(shape[0] - 1) / 2, (shape[1] - 1) / 2, offset_axis2])
+    corners = np.array([[i, j, k] for i in (0, shape[0] - 1)
+                        for j in (0, shape[1] - 1)
+                        for k in (0, shape[2] - 1)], dtype=float)
+    rotated_corners = (corners - center_in) @ rotation.T
+    lower, upper = rotated_corners.min(axis=0), rotated_corners.max(axis=0)
+    center_out = -lower
+    out_shape = tuple(int(np.ceil(u - l)) + 1 for l, u in zip(lower, upper))
+    return rotation, center_in, center_out, out_shape, int(round(center_out[2]))
+
+
 def split_hemibodies(volume: np.ndarray,
                      theta_1: float,
                      theta_2: float,
@@ -216,29 +264,72 @@ def split_hemibodies(volume: np.ndarray,
         (`low_side`, `high_side`): the axis-2 < plane side as is ('L'), and the other side flipped
         along axis 2 ('R'), so that both have the same orientation.
     """
-    normal = _plane_normal(theta_1, theta_2)
-    axis2 = np.array([0.0, 0.0, 1.0])
-    v = np.cross(normal, axis2)
-    s, c = np.linalg.norm(v), normal @ axis2
-    if s < 1e-12:
-        rotation = np.eye(3)
-    else:
-        vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-        rotation = np.eye(3) + vx + vx @ vx * (1 - c) / s ** 2
-
-    center_in = np.array([(volume.shape[0] - 1) / 2, (volume.shape[1] - 1) / 2, offset_axis2])
-    corners = np.array([[i, j, k] for i in (0, volume.shape[0] - 1)
-                        for j in (0, volume.shape[1] - 1)
-                        for k in (0, volume.shape[2] - 1)], dtype=float)
-    rotated_corners = (corners - center_in) @ rotation.T
-    lower, upper = rotated_corners.min(axis=0), rotated_corners.max(axis=0)
-    center_out = -lower
-    out_shape = tuple(int(np.ceil(u - l)) + 1 for l, u in zip(lower, upper))
+    rotation, center_in, center_out, out_shape, split_index = _split_geometry(
+        volume.shape, theta_1, theta_2, offset_axis2)
     matrix = rotation.T
     rotated = affine_transform(volume, matrix=matrix, offset=center_in - matrix @ center_out,
                                output_shape=out_shape, order=order, mode='constant', cval=0)
-    split_index = int(round(center_out[2]))
     return rotated[:, :, :split_index], np.flip(rotated[:, :, split_index:], axis=2).copy()
+
+
+def hemibodies_to_original(left: np.ndarray,
+                           right: np.ndarray,
+                           split_info: dict,
+                           original_shape: tuple,
+                           order: int = 0,
+                           chunk_planes: int = 8) -> np.ndarray:
+    """
+    Bring two hemibody volumes (e.g. labels) back into the frame of the original projection: the
+    inverse of the resampling, rotation, split and flip of `split_recording`.
+
+    Each voxel of the original grid is mapped to the isotropic grid (as `scipy.ndimage.zoom`
+    maps them), then into the rotated grid, and sampled from the hemibody on its side of the
+    plane (the R one flipped back).
+
+    Parameters
+    ----------
+    left, right : np.ndarray
+        L and R hemibody volumes, in the hemibody frames saved by `split_recording` (they may be
+        padded at the high end of each axis).
+    split_info : dict
+        The `{name}_split.json` of the recording (`isotropic_shape`, `theta_1_rad`,
+        `theta_2_rad`, `offset_axis2`, `L_shape`).
+    original_shape : tuple of int
+        Shape of the original projection, (Z, X, Y) as in `projection_images.h5`.
+    order : int
+        Interpolation order: 0 (nearest) for labels, 1 for images.
+    chunk_planes : int
+        Planes of the original grid processed at a time (memory).
+
+    Returns
+    -------
+    np.ndarray
+        Volume of shape `original_shape`, dtype of `left` (0 outside both hemibodies).
+    """
+    iso_shape = tuple(split_info['isotropic_shape'])
+    rotation, center_in, center_out, out_shape, split_index = _split_geometry(
+        iso_shape, split_info['theta_1_rad'], split_info['theta_2_rad'],
+        split_info['offset_axis2'])
+    # scipy.ndimage.zoom (grid_mode=False) maps output index o to input o * (in - 1) / (out - 1)
+    scale = np.array([(i - 1) / (o - 1) for i, o in zip(iso_shape, original_shape)])
+    n_right = out_shape[2] - split_index
+    output = np.zeros(original_shape, dtype=left.dtype)
+    i1, i2 = np.meshgrid(np.arange(original_shape[1]), np.arange(original_shape[2]),
+                         indexing='ij')
+    for start in range(0, original_shape[0], chunk_planes):
+        stop = min(start + chunk_planes, original_shape[0])
+        i0 = np.arange(start, stop)[:, None, None]
+        points = np.stack(np.broadcast_arrays(i0, i1[None], i2[None]), axis=-1) * scale
+        rotated = (points - center_in) @ rotation.T + center_out
+        is_left = rotated[..., 2] < split_index - 0.5
+        right_coordinates = rotated.copy()
+        right_coordinates[..., 2] = (n_right - 1) - (rotated[..., 2] - split_index)
+        for volume, coordinates, side in ((left, rotated, is_left),
+                                          (right, right_coordinates, ~is_left)):
+            values = ndi.map_coordinates(volume, np.moveaxis(coordinates, -1, 0), order=order,
+                                         mode='constant', cval=0)
+            output[start:stop][side] = values[side]
+    return output
 
 
 def split_recording(scape_path: str | Path,
@@ -304,6 +395,7 @@ def split_recording(scape_path: str | Path,
                    'array_axes': 'ZXY (as projection_images.h5)',
                    'voxel_size_um': target_voxel_size,
                    'original_voxel_sizes_xyz_um': [float(v) for v in voxel_sizes_xyz],
+                   'original_shape': list(projection.shape),
                    'isotropic_shape': list(iso.shape),
                    'theta_1_rad': theta_1, 'theta_2_rad': theta_2, 'offset_axis2': offset_axis2,
                    'symmetry_ncc': ncc,
