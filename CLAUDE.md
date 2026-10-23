@@ -9,6 +9,8 @@ Two types of raw datasets, both recordings of muscle-GCaMP Drosophila pupas
 - 2d videos collected on Victor Stimplin's FlyTrack, saved as .mkv videos where each saved frame is RGBA but each channel corresponds to 1 real frame
 - 3d videos collected on Jasper Phelp's SCAPE, saved as single .dat volumes and loadable using the scape-io module. Needs deskewing.
 
+One top-level folder per pipeline (`flytrack/`, `scape/`, `ct_scan/`, `master_reference_3d/`, `traces_2d/`), plus the shared `common/` package (data paths in `common/paths.py`); see the root `README.md`.
+
 ## Claude config
 
 - Start new conversations by greeting me with "Hi Maite!" before then continuing with your response
