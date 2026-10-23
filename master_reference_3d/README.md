@@ -1,10 +1,15 @@
-## Shape registration of SCAPE hemibodies
+# master_reference_3d
 
-Registers SCAPE recordings of pupal leg muscles to each other by the shape of their muscle masks, one leg segment at a time, and averages them into a master reference. The method is described in `pipeline.md`.
+Pipelines 4-6 (run with the conda environment `scapeio`):
+- 4: build the master reference, a master 3D image and muscle mask labelled by leg segment, from several SCAPE recordings (`build_master_reference.py`); later it will hold a map of identified muscles and be registered to the CT-scan labels (`ct_scan/`),
+- 5: register a 3D video to the master, and map the master's labels back onto it (`register_recording.py`),
+- 6 (planned): extract the time trace of each label from the 3D video, with the labels mapped onto it.
 
-Self-contained from the projection images on: it starts from `{sample#_run#}/analysis/projection_images.h5`, computed in the `scape` folder (`scape/MANUAL/preprocess_scape_exp.py`), and imports nothing from other folders of the repository.
+The registration matches SCAPE recordings by the shape of their muscle masks, one leg segment at a time. The method is described in `pipeline.md`.
 
-Intensity-based registration (SPAM, see `../SPAM_registration`) does not converge well on the long tube-like muscles: their intensity barely changes when they slide along their own axis. Matching the shape of the muscle masks (their ends and outlines) avoids this.
+Self-contained from the projection images on: it starts from `{sample#_run#}/analysis/projection_images.h5`, computed in the `scape` folder (`scape/preprocess_scape_exp.py`), and imports nothing from the other pipeline folders (only the shared `common` package).
+
+Intensity-based registration (SPAM, tried before and since removed) does not converge well on the long tube-like muscles: their intensity barely changes when they slide along their own axis. Matching the shape of the muscle masks (their ends and outlines) avoids this.
 
 ### Running it
 
@@ -20,5 +25,6 @@ Intensity-based registration (SPAM, see `../SPAM_registration`) does not converg
 - `label_mask_components.py`: computes the automatic muscle mask of hemibody tifs (`muscle_mask.py`) and labels its connected components (muscle clusters), saved as napari Labels tifs next to a scale-1 copy of the image, to assign each cluster to a leg segment by hand (`{recording}_segment_ids.json`, only needed for the reference). E.g. `python label_mask_components.py hemibody.ome.tif [...] -o /mnt/labserver/data/MA/SCAPE/master_reference/segment_masks`.
 - `registration_round.py`: one registration round: registers all hemibodies to a template, one leg segment at a time (the head gets no fit of its own), blends the segment transforms into one smooth deformation, and averages the normalised registered images into a master image and majority-vote muscle mask. Round 1 uses the labelled reference hemibody as the template (`master_reference/registered_hemibodies`); later rounds use the master muscle mask of the previous round (`master_reference/registered_hemibodies_round2`, ...). Run by `build_master_reference.py`.
 - `register_recording.py`: registers a new recording to the master and brings a master label map back onto it (see above).
-- `muscle_mask.py`: the automatic muscle mask (log-contrast to the local background, hysteresis threshold, removal of small or non-elongated components), copied from the mask part of `scape/MANUAL/auto_segment_muscles.py`.
+- `auto_segment_muscles.py`: the automatic muscle mask and its splitting into individual muscles (in progress; the mask part is what `muscle_mask.py` copies).
+- `muscle_mask.py`: the automatic muscle mask (log-contrast to the local background, hysteresis threshold, removal of small or non-elongated components), copied from the mask part of `auto_segment_muscles.py`.
 - `register_segments.py`: the registration itself (signed distance maps of the masks, fit restricted to the inside of the template segment, target field of view handled as unknown; rigid then affine), used by `registration_round.py`.

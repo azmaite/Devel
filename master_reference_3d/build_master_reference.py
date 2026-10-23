@@ -5,7 +5,7 @@ already exists, so the script can be rerun after adding a recording or after the
 
 Starts from the projection images of the recordings in `RECORDINGS`
 (`{sample#_run#}/analysis/projection_images.h5`, computed in the `scape` folder with
-`scape/MANUAL/preprocess_scape_exp.py`), and saves everything in `MASTER_PATH`:
+`scape/preprocess_scape_exp.py`), and saves everything in `MASTER_PATH`:
 1. `original_hemibodies`: the two isotropic hemibodies of each recording
    (`split_hemibodies.py`),
 2. `segment_masks`: the automatic muscle mask of each hemibody, labelled by muscle cluster, with
@@ -42,12 +42,13 @@ import label_mask_components
 import registration_round
 import split_hemibodies
 
-SCAPE_PATH = Path('/mnt/labserver/data/MA/SCAPE')
+from common.paths import MASTER_REFERENCE_PATH, SCAPE_PATH
+
 # recordings (`sample#_run#` folders) whose minimum projections are used
 RECORDINGS = [SCAPE_PATH / '20261016_V7xPR_pupa_long_paired' / 'sample1_run3_short',
               SCAPE_PATH / '20261021_V7xPR_pupa_long_paired_early' / 'sample1_run1',
               SCAPE_PATH / '20261021_V7xPR_pupa_long_scape' / 'sample1_run01_short_20261021_1638']
-MASTER_PATH = SCAPE_PATH / 'master_reference'
+MASTER_PATH = MASTER_REFERENCE_PATH
 # hemibody (`{experiment}_{sample#_run#}_{side}`) whose clusters are assigned to leg segments by
 # hand, the template of round 1
 REFERENCE = '20261021_V7xPR_pupa_long_paired_early_sample1_run1_R'

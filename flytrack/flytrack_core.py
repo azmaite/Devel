@@ -58,18 +58,17 @@ import matplotlib
 matplotlib.use('Agg')  # force a non-interactive backend
 import matplotlib.pyplot as plt
 
-# put this file's folder and its parent (which holds utils.py) on sys.path so
-# `import utils` works no matter how this module is launched (as a script, via
-# `-m`, or imported as FlyTrack.<module> from a notebook) or what the working
-# directory is
+# put this file's folder on sys.path so the other scripts of this folder can be imported no
+# matter how this module is launched (as a script, via `-m`, or imported from a notebook) or what
+# the working directory is
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (_HERE, os.path.dirname(_HERE)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-import utils
+import flytrack_io
+from common.paths import FLYTRACK_PATH
 
-MAIN_PATH = '/mnt/labserver/data/MA/Development_project'
+MAIN_PATH = str(FLYTRACK_PATH)
 
 # saving names
 PROJ_H5_NAME = 'projection_images.h5'        # per-recording, next to each .mkv
@@ -260,7 +259,7 @@ def _get_framerate(mkv_file: str,
         Path to the .mkv video file.
     fallback : float
         Frame rate to use if it can't be read from the config, e.g. the one
-        estimated from the timestamps by `utils.load_timestamps()`.
+        estimated from the timestamps by `flytrack_io.load_timestamps()`.
 
     Returns
     -------
@@ -817,7 +816,7 @@ def _plot_activity(mkv_file: str,
         Save path of the plot; its folder is created if needed.
     """
 
-    timestamps, _ = utils.load_timestamps(mkv_file)
+    timestamps, _ = flytrack_io.load_timestamps(mkv_file)
     if len(timestamps) != len(act):
         print(f'Warning: number of timestamps ({len(timestamps)}) does not match '
               f'number of frames ({len(act)}), LOST FRAMES.')
@@ -881,7 +880,7 @@ def _process_mkv(mkv_file: str,
 
     # timestamps from the matching _tif_metadata.h5 file; their count is the
     # expected frame count. The fps comes from the acquisition config.
-    timestamps, ts_fps = utils.load_timestamps(mkv_file)
+    timestamps, ts_fps = flytrack_io.load_timestamps(mkv_file)
     n_frames = len(timestamps)
     fps = _get_framerate(mkv_file, fallback=ts_fps)
 
@@ -982,7 +981,7 @@ def _read_existing_metadata(mkv_file: str) -> tuple[list[int], int, float]:
         height, width = f['max_proj'].shape  # type: ignore[index]
         num_frames = int(f['frame_count'][()])  # type: ignore[index]
 
-    _, ts_fps = utils.load_timestamps(mkv_file)
+    _, ts_fps = flytrack_io.load_timestamps(mkv_file)
     fps = _get_framerate(mkv_file, fallback=ts_fps)
 
     return [int(width), int(height)], num_frames, float(fps)
@@ -1178,7 +1177,7 @@ def _store_tif_metadata(tif_files: list[Path],
 
     Each csv row is one real frame (frame_id, timestamp, is_kinematic, and
     optionally stage_position). Values are stored as strings, as in
-    flymuscle-control, which `utils.load_timestamps()` expects.
+    flymuscle-control, which `flytrack_io.load_timestamps()` expects.
 
     Parameters
     ----------

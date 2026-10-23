@@ -1,7 +1,7 @@
 [project]
 name = "devel"
 version = "0.1.0"
-description = "Add your description here"
+description = "Analysis of muscle-GCaMP recordings of Drosophila pupae (FlyTrack 2D, SCAPE 3D)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -33,3 +33,12 @@ dev = [
 
 [tool.uv.sources]
 scapeio = { path = "../scapeio", editable = true }
+
+# only the shared helpers are a package (`from common import ...`); the pipeline folders are
+# folders of scripts, run from their own folder
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["common"]

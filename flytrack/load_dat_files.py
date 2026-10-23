@@ -257,7 +257,7 @@ def load_dat_timestamps(folder: str) -> tuple[np.ndarray, float]:
 
     Timestamps are read from each chunk's `camera_timestamp_us` column and
     converted to SECONDS relative to the first frame, mirroring
-    `utils.load_timestamps()` for the `.mkv` format. Row order within each
+    `flytrack_io.load_timestamps()` for the `.mkv` format. Row order within each
     `_timestamps.csv` is assumed to match its `.dat`'s frame order, so
     timestamp index `i` corresponds to `load_dat_frame(folder, i)`.
 

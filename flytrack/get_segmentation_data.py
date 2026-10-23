@@ -15,8 +15,8 @@ covering the whole frame) it:
 2. Otsu-thresholds ``max_proj - median`` (grouped) within the ROI to keep only
    the 'active' pixels, and saves a diagnostic PNG of the threshold per segment.
 3. Subtracts the grouped median from the active-pixel frames and normalizes
-   the result to 0-1 (`utils.diff_norm_frames`), then selects the `n_select`
-   most different frames (`utils.select_most_different_frames`).
+   the result to 0-1 (`nmf.diff_norm_frames`), then selects the `n_select`
+   most different frames (`nmf.select_most_different_frames`).
 
 Results are saved to `segmentation_data.h5` in `analysis_folder` and also
 returned as a dict.
@@ -35,21 +35,21 @@ import av
 import tqdm
 from skimage.filters import threshold_otsu
 
-# put this file's folder and its parent (which holds utils.py) on sys.path so
-# `import utils` works no matter how this module is launched (as a script, via
-# `-m`, or imported as FlyTrack.<module> from a notebook) or what the working
-# directory is
+# put this file's folder on sys.path so the other scripts of this folder can be imported no
+# matter how this module is launched (as a script, via `-m`, or imported from a notebook) or what
+# the working directory is
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (_HERE, os.path.dirname(_HERE)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-import utils
+import flytrack_io
+from common import masks, nmf
+from common.paths import FLYTRACK_PATH
 from flytrack_core import MKV_PATHS_NAME, GROUPED_H5_NAME
 from preprocess_flytrack import _shift_int
 
 
-MAIN_PATH = '/mnt/labserver/data/MA/Development_project'
+MAIN_PATH = str(FLYTRACK_PATH)
 
 SEGMENT_ROIS_NAME = 'segment_rois.h5'
 SEGMENTATION_DATA_NAME = 'segmentation_data.h5'
@@ -120,7 +120,7 @@ def get_segmentation_data(analysis_folder: str = '',
     if not (os.path.exists(grouped_path) and os.path.exists(mkv_paths_path)):
         raise FileNotFoundError(
             f'{analysis_folder} does not contain {GROUPED_H5_NAME} and/or '
-            f'{MKV_PATHS_NAME}. Run FlyTrack.preprocess_flytrack on this '
+            f'{MKV_PATHS_NAME}. Run preprocess_flytrack.py on this '
             f'folder first.')
 
     with open(mkv_paths_path, 'r') as f:
@@ -170,12 +170,12 @@ def _load_or_default_rois(analysis_folder: str,
     -------
     tuple of (dict, dict, list of str)
         (masks, bounding_boxes, segment_names), keyed/ordered as in
-        `utils.load_segment_rois`.
+        `flytrack_io.load_segment_rois`.
     """
 
     rois_path = os.path.join(analysis_folder, SEGMENT_ROIS_NAME)
     if os.path.exists(rois_path):
-        _, masks, bounding_boxes, segment_names = utils.load_segment_rois(analysis_folder)
+        _, masks, bounding_boxes, segment_names = flytrack_io.load_segment_rois(analysis_folder)
         return masks, bounding_boxes, segment_names
 
     print(f'No {SEGMENT_ROIS_NAME} found in {analysis_folder}. Either run '
@@ -249,7 +249,7 @@ def _load_raw_roi_frames(entries: list[dict],
                     img = arr[..., j]
                     for name in segment_names:
                         all_frames_flat[name][frame_offset + i] = \
-                            utils.mask_image(img, rec_masks[name])
+                            masks.mask_image(img, rec_masks[name])
                     i += 1
                     pbar.update(1)
         container.close()
@@ -299,8 +299,8 @@ def _process_segment(analysis_folder: str,
         See `get_segmentation_data`'s Returns section for the per-segment keys.
     """
 
-    activity_flat = utils.mask_image(activity_img, mask)
-    median_flat = utils.mask_image(median_img, mask)
+    activity_flat = masks.mask_image(activity_img, mask)
+    median_flat = masks.mask_image(median_img, mask)
 
     otsu_threshold, threshold = _active_threshold(activity_flat)
     active_mask = activity_flat > threshold
@@ -312,13 +312,13 @@ def _process_segment(analysis_folder: str,
     frames_active = frames_flat[:, active_mask]
     median_active = median_flat[active_mask]
 
-    frames_dif_norm = utils.diff_norm_frames(frames_active,
+    frames_dif_norm = nmf.diff_norm_frames(frames_active,
                                              background_img=median_active,
                                              rolling_win=None)
 
     print(f'Selecting {n_select} most different frames for {name}...')
     selected_idx = np.array(
-        utils.select_most_different_frames(frames_dif_norm, n_select=n_select))
+        nmf.select_most_different_frames(frames_dif_norm, n_select=n_select))
 
     return {
         'mask': mask,
@@ -412,7 +412,7 @@ def _plot_active_pixels(save_folder: str,
 
     x, y, w, h = bounding_box
     activity_crop = activity_img[y:y+h, x:x+w]
-    active_img = utils.unmask_image(active_mask.astype(np.uint8), mask,
+    active_img = masks.unmask_image(active_mask.astype(np.uint8), mask,
                                     bounding_box).astype(bool)
 
     norm = ((activity_crop - activity_crop.min())

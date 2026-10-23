@@ -3,7 +3,7 @@ GENERAL PURPOSE FUNCTIONS FOR SCAPE DATA ANALYSIS
 Writen manually with limited help from CLAUDE (max single functions)
 
 It assumes the following folder structure (if not, it will fix it):
-- main_path : /mnt/upamdya_data/MA/SCAPE
+- main_path : /mnt/labserver/data/MA/SCAPE (`common.paths.SCAPE_PATH`)
 -- exp_folder : date_info folder than contains recordings from one day
 --- sample#_run# : folder containing a single SCAPE recording (scape_path)
 ---- sample#_run# : subfolder folder containing raw data (.dat) files (scape_raw_path)
@@ -59,7 +59,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-MAIN_PATH = '/mnt/upramdya_data/MA/SCAPE'
+from common.paths import SCAPE_PATH
+
+MAIN_PATH = str(SCAPE_PATH)
 ANALYSIS_PATH_NAME = "analysis"
 PROJECTION_FILE_NAME = "projection_images.h5"
 AUTO_BATCH_VOXELS = 1.4e9 # raw voxels loaded per batch by get_auto_batch_size

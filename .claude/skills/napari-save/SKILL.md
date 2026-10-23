@@ -45,9 +45,9 @@ Conventions in this repo (SCAPE):
 | Old manual label tifs (`RLF-RLM_leg_segments.tif`), `edit_labels_napari.py` | (Z, X, Y) like the h5 | `(vz, vx, vy)` |
 
 - `voxel_sizes_xyz` in the h5 is stored `(x, y, z)`; `scape_utils.load_voxel_size(folder)` returns a dict with keys `x`, `y`, `z`.
-- WebKnossos (x, y, z) -> OME order: `np.transpose(labels, (2, 1, 0))`; -> h5 order: `np.transpose(labels, (2, 0, 1))`. (See `scape/MANUAL/webknossos_labels_to_tif.py`.)
+- WebKnossos (x, y, z) -> OME order: `np.transpose(labels, (2, 1, 0))`; -> h5 order: `np.transpose(labels, (2, 0, 1))`. (See `ct_scan/webknossos_labels_to_tif.py`.)
 - Swapping between the two image conventions is `.transpose(0, 2, 1)`.
-- Say in the output docstring/json which order was used (`'axes': 'zyx'`), and when loading a label tif to overlay on `load_proj`, transpose it if its order differs (pattern in `scape/MANUAL/edit_labels_napari.py`).
+- Say in the output docstring/json which order was used (`'axes': 'zyx'`), and when loading a label tif to overlay on `load_proj`, transpose it if its order differs (pattern in `scape/edit_labels_napari.py`).
 
 ## Check before declaring it done
 

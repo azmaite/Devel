@@ -3,18 +3,18 @@ Split SCAPE recordings into their two hemibodies, as isotropic volumes, and save
 
 Starts from the projection images of a recording (`{sample#_run#}/analysis/projection_images.h5`,
 with the projections in (Z, X, Y) order and `voxel_sizes_xyz`), which are computed in the `scape`
-folder (`scape/MANUAL/preprocess_scape_exp.py`). For each `sample#_run#` folder given, this:
+folder (`scape/preprocess_scape_exp.py`). For each `sample#_run#` folder given, this:
 - loads the projection (`min_proj` by default) and resamples it to isotropic voxels
   (`TARGET_VOXEL_SIZE` = 1.5 um by default), so that a tilted mirror plane is a proper reflection,
 - fits the (slightly tilted) mirror-symmetry plane of the whole volume, rotates the volume so the
   plane is perpendicular to axis 2, and splits it there. The axis-2 >= plane side is flipped along
   axis 2, so that both hemibodies have the same orientation,
 - saves the two hemibodies as `{experiment}_{run}_L.ome.tif` and `..._R.ome.tif` (float32, array
-  order (Z, X, Y) as in `projection_images.h5` and `SPAM_registration/spam_pipeline.ipynb`, with
+  order (Z, X, Y) as in `projection_images.h5`, with
   the isotropic voxel size in the OME metadata), plus a json with the fitted plane and a png
   showing the volume (red) over its mirror image (green), to check the plane.
 
-The plane fitting and splitting are the same as in `spam_pipeline.ipynb`.
+The plane fitting and splitting were first written for the SPAM pipeline (since removed).
 
 Run from the terminal (`python split_hemibodies.py run_folder [run_folder ...] -o out_folder`) or
 import and call `split_recording`.
@@ -370,7 +370,7 @@ def split_recording(scape_path: str | Path,
     h5_path = scape_path / 'analysis' / 'projection_images.h5'
     if not h5_path.exists():
         raise FileNotFoundError(f'{h5_path} not found: compute the projections first with '
-                                f'scape/MANUAL/preprocess_scape_exp.py.')
+                                f'scape/preprocess_scape_exp.py.')
     with h5py.File(h5_path, 'r') as f:
         projection = f[proj_type][:].astype(np.float32)
         voxel_sizes_xyz = f['voxel_sizes_xyz'][:]

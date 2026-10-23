@@ -11,9 +11,10 @@ from pathlib import Path
 import napari
 import tifffile
 
+from common.paths import SCAPE_PATH
 from scape_utils import load_voxel_size, load_proj
 
-main_path = Path('/mnt/labserver/data/MA/SCAPE/')
+main_path = SCAPE_PATH
 folder = main_path / '20261016_V7xPR_pupa_long_paired' / 'sample1_run3_short' 
 
 tif_list = [

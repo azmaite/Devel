@@ -34,8 +34,8 @@ import h5py
 import numpy as np
 import tifffile
 
-# the referenceMaps folder is not a package: put it on sys.path to import its webknossos.py
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'referenceMaps'))
+# webknossos.py is in this folder: make it importable however this script is launched
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from webknossos import load_labels_in_frame, load_segment_group_names
 
 ANALYSIS_PATH_NAME = 'analysis'                  # same as scape_utils.ANALYSIS_PATH_NAME

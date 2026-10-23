@@ -4,7 +4,7 @@ segment at a time.
 
 The leg segments of one leg (femur, tibia, ...) move relative to each other, so each one gets
 its own transform. Registering the intensity of the muscles does not work well (see
-`SPAM_registration/README.md` and `pipeline.md`): a muscle is a long tube, and the image match is nearly flat when
+the SPAM registration tried before, since removed, and `pipeline.md`): a muscle is a long tube, and the image match is nearly flat when
 the tube slides along its own axis, so the optimiser has nothing to hold on to and does not
 converge. The shape of a segment's muscles (its outline, with its ends) fixes the position along
 the axis. Here each segment is therefore represented by the binary mask of its muscles, and the

@@ -1,7 +1,7 @@
 """
 Automatic muscle mask of a 3D fluorescence image of fly legs (e.g. an isotropic SCAPE hemibody,
 1.5 um voxels), for `label_mask_components.py`. Copied from the mask part of
-`scape/MANUAL/auto_segment_muscles.py` (which also splits the mask into individual muscles), so
+`auto_segment_muscles.py` (which also splits the mask into individual muscles), so
 that this folder is self-contained. Muscles are long bright tubes surrounded by darker tissue:
 
 1. Log-transform (fluorescence is multiplicative: a muscle is some factor brighter than its

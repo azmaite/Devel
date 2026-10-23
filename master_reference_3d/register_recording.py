@@ -59,8 +59,9 @@ import label_mask_components
 import register_segments as rs
 import registration_round as rr
 import split_hemibodies
+from common.paths import MASTER_REFERENCE_PATH
 
-MASTER_PATH = Path('/mnt/labserver/data/MA/SCAPE/master_reference')
+MASTER_PATH = MASTER_REFERENCE_PATH
 VOXEL_SIZE_UM = rr.VOXEL_SIZE_UM
 
 

@@ -115,8 +115,8 @@ matplotlib.use('Agg')  # force a non-interactive backend
 import matplotlib.pyplot as plt
 
 # put this file's folder on sys.path so `import flytrack_core` works no matter
-# how this module is launched (as a script, via `-m`, or imported as
-# FlyTrack.<module> from a notebook) or what the working directory is
+# how this module is launched (as a script, via `-m`, or imported from a
+# notebook) or what the working directory is
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -126,7 +126,7 @@ from flytrack_core import (MAIN_PATH, MKV_PATHS_NAME, PROJ_H5_NAME,
                            _highpass, _process_mkv, _outputs_exist,
                            _is_corrected, _read_existing_metadata,
                            _parse_selection, _plot_activity, _write_pngs)
-import utils  # importable once flytrack_core has put its parent on sys.path
+import flytrack_io
 
 ACT_FOLDER = '00_activity'               # in the main folder (long recording)
 ANALYSIS_SUFFIX = '_analysis'            # analysis folder: YYYY-MM-DD_analysis
@@ -168,7 +168,7 @@ def preprocess_flytrack(folder: str = '',
         from tkinter import filedialog
         root = tk.Tk()
         root.withdraw()
-        utils.sort_dialog_descending(root)  # newest (YYYYMMDD_...) folders first
+        flytrack_io.sort_dialog_descending(root)  # newest (YYYYMMDD_...) folders first
         folder = filedialog.askdirectory(initialdir=MAIN_PATH,
                                          title='Select folder to preprocess')
 

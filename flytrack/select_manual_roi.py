@@ -55,8 +55,10 @@ import os
 import numpy as np
 import h5py
 
+from common.paths import FLYTRACK_PATH
 
-MAIN_PATH = '/mnt/labserver/data/MA/Development_project'
+
+MAIN_PATH = str(FLYTRACK_PATH)
 
 # names of the projection-images h5 files searched for in the input folder, in
 # priority order (the grouped/aligned one is preferred when both are present)
@@ -591,7 +593,7 @@ def _save_rois(folder: str,
     3D, the voxel size) is written once. Per-segment datasets: ``{name}_mask``,
     ``{name}_bounding_box``, and either ``{name}_roi`` (2D) or ``{name}_roi_xy`` /
     ``{name}_roi_zy`` (3D, with ``{name}_roi`` kept as an alias of the X-Y polygon
-    for backward compatibility with `utils.load_segment_rois`).
+    for backward compatibility with `flytrack_io.load_segment_rois`).
 
     Parameters
     ----------
@@ -643,7 +645,7 @@ def _save_rois(folder: str,
             if is_3d:
                 f.create_dataset(f'{name}_roi_xy', data=res['roi_xy'])
                 f.create_dataset(f'{name}_roi_zy', data=res['roi_zy'])
-                # alias so utils.load_segment_rois still finds a `{name}_roi`
+                # alias so flytrack_io.load_segment_rois still finds a `{name}_roi`
                 f.create_dataset(f'{name}_roi', data=res['roi_xy'])
             else:
                 f.create_dataset(f'{name}_roi', data=res['roi'])

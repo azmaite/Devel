@@ -91,8 +91,9 @@ import SimpleITK as sitk
 import tifffile
 
 import register_segments as rs
+from common.paths import MASTER_REFERENCE_PATH
 
-MASTER_PATH = Path('/mnt/labserver/data/MA/SCAPE/master_reference')
+MASTER_PATH = MASTER_REFERENCE_PATH
 REFERENCE = '20261021_V7xPR_pupa_long_paired_early_sample1_run1_R'
 HEMIBODIES = ['20261021_V7xPR_pupa_long_paired_early_sample1_run1_L',
               '20261016_V7xPR_pupa_long_paired_sample1_run3_short_L',
