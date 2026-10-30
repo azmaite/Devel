@@ -4,8 +4,10 @@ Pipeline 2: preprocess 3D muscle videos recorded on SCAPE. Run with the conda en
 `scapeio`.
 
 - `transfer_scape_recordings.py`: runs on the SCAPE PC during acquisition, and moves each finished
-  recording to the server (so the SCAPE PC disk does not fill up). It keeps its own paths and
-  imports nothing from this repository.
+  recording to the server (so the SCAPE PC disk does not fill up). Each run is renamed on the SCAPE
+  PC as soon as it finishes (`sample1_run##_YYYYMMDD_HHMM`, numbered in order), so the acquisition
+  software can't reuse its name while it waits to be moved. It keeps its own paths and imports
+  nothing from this repository.
 - `preprocess_scape_exp.py`: for an experiment folder, fix the folder structure of each
   `sample#_run#` recording, compute its projection images (deskewed min/max/std projections and
   activity, `analysis/projection_images.h5` and OME-TIFFs), combine the runs of each sample, and
