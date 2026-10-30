@@ -78,7 +78,11 @@ Run it in a `tmux`/`screen` session so it survives closing the terminal:
 (give the full path to get tab completion, just the folder name, or nothing
 to choose the folder from a numbered list of experiments on the scapepc).
 
-Stop it with Ctrl+C (an interrupted transfer resumes on the next start).
+It stops by itself once nothing has happened for `--timeout` hours (default
+3): no run renamed or moved, and no file of a run on the scapepc changed (so
+a recording in progress keeps it running). `--timeout 0` watches forever.
+Stop it earlier with Ctrl+C (an interrupted transfer resumes on the next
+start).
 """
 
 import argparse
@@ -477,6 +481,7 @@ def watch(src_exp: Path,
           dst_exp: Path,
           settle: float,
           no_sifx_after: float,
+          timeout: float,
           poll: float,
           workers: int,
           checksum: bool,
@@ -484,7 +489,8 @@ def watch(src_exp: Path,
           dry_run: bool) -> None:
     """
     Poll `src_exp`, rename every finished run and move it to `dst_exp`,
-    forever (or until no finished runs are left, if `once`).
+    until nothing has happened for `timeout` seconds (or until no finished
+    runs are left, if `once`).
 
     Parameters
     ----------
@@ -496,6 +502,9 @@ def watch(src_exp: Path,
         Seconds without any file change after which a run with an
         `_info.mat` and raw data but no `Spooled files.sifx` counts as
         finished.
+    timeout : float
+        Seconds without any activity (a run renamed or moved, or a run's
+        files on the scapepc changing) after which to stop. 0 to never stop.
     poll : float
         Seconds between checks of `src_exp`.
     workers : int
@@ -511,6 +520,7 @@ def watch(src_exp: Path,
     reported = set()  # (run, reason) already logged, to log each only once
     dry_renamed = {}  # dry run only: original name -> would-be new name
     dry_moved = set()  # dry run only: original names already 'moved'
+    last_activity = time.time()  # last rename/move or scapepc file change
 
     def report(run: str,
                reason: str,
@@ -557,6 +567,7 @@ def watch(src_exp: Path,
             has_info = (src_exp / (run + '_info.mat')).is_file()
             has_raw = any(src_run.glob('*spool.dat'))
             state = snapshot(files)
+            last_activity = max(last_activity, state[2])
             # Files written after the run was renamed: no sidecars and no
             # raw data (so not a new recording that reuses the name)
             if (run in originals and not has_info and not has_raw
@@ -616,13 +627,21 @@ def watch(src_exp: Path,
                 time.sleep(poll)
             if dry_run:
                 dry_moved.add(src_name)
+            last_activity = time.time()
             continue
 
         if once and not last_state:
             return
+        idle = time.time() - last_activity
+        if timeout and idle > timeout:
+            log(f'Nothing happened for {timeout / 3600:g} h, stopping')
+            return
         try:
             free = shutil.disk_usage(src_exp).free / 1e9
             status = f'{free:.0f} GB free on scapepc'
+            if timeout:
+                status += (f', idle {idle / 3600:.1f} h of '
+                           f'{timeout / 3600:g} h')
         except OSError:
             status = ''
         global _status_shown
@@ -652,6 +671,11 @@ def main() -> None:
                         help='Seconds without file changes after which a run '
                              'with an _info.mat and raw data but no '
                              f'"{END_MARKER}" is moved anyway (default: 1800)')
+    parser.add_argument('--timeout', type=float, default=3,
+                        help='Hours without any activity (a run renamed or '
+                             'moved, or a run\'s files on the scapepc '
+                             'changing) after which to stop; 0 to never stop '
+                             '(default: 3)')
     parser.add_argument('--poll', type=float, default=60,
                         help='Seconds between checks (default: 60)')
     parser.add_argument('--workers', type=int, default=4,
@@ -672,10 +696,12 @@ def main() -> None:
         _log_file = dst_exp / LOG_NAME
     log(f'Watching {src_exp}\n    moving finished runs to {dst_exp}\n'
         f'    settle={args.settle:.0f}s no_sifx_after={args.no_sifx_after:.0f}s '
+        f'timeout={args.timeout:g}h '
         f'poll={args.poll:.0f}s workers={args.workers} '
         f'checksum={args.checksum}')
     try:
-        watch(src_exp, dst_exp, args.settle, args.no_sifx_after, args.poll,
+        watch(src_exp, dst_exp, args.settle, args.no_sifx_after,
+              args.timeout * 3600, args.poll,
               args.workers, args.checksum, args.once, args.dry_run)
     except KeyboardInterrupt:
         log('Stopped by user')
