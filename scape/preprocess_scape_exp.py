@@ -20,9 +20,25 @@ creates a new folder called sample#_combined and combines all the projections fo
 sample, before moving on to the next sample. Samples with a single run get no
 sample#_combined folder (use the sample#_run# folder directly).
 
-Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder] [-b N] [-o]`) or imported
-and called as a function. If `exp_folder` is not given, a folder-selection dialog opens,
-starting in `scape_utils.MAIN_PATH`.
+Long recordings: if the experiment folder name ends with the puparium formation time
+(`..._MM-DD_HHhMM`, e.g. `20261023_V7xPR_pupa_long_scape_prepup_10-21_11h15`), each run's
+activity plot is saved in `<exp_folder>/00_activity/` instead of its analysis folder, named
+after the run plus its hours after puparium formation, e.g.
+`sample1_run03_20261023_1825_55hAPF.png` (as in `flytrack/preprocess_flytrack.py`). The
+recording time is `scanStartTimeApprox` from the run's `_info.mat`, or else the
+`_YYYYMMDD_HHMM` at the end of the run folder name; if neither is found the hAPF is omitted.
+Activity plots already in a run's analysis folder are moved there too (see
+collect_activity_plots). The sample#_combined activity plot stays in its folder.
+
+Live mode (-l/--live): to run alongside `transfer_scape_recordings.py` during a long
+acquisition. There is no selection prompt; every run is preprocessed as soon as it has been
+fully transferred to the server (its `_info.mat`, which the transfer script moves last, is
+there), checking for new runs every minute. When no new run has appeared for 3 hours
+(--live-timeout), or on Ctrl+C, the runs are combined per sample and the script ends.
+
+Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder] [-b N] [-o] [-l]`)
+or imported and called as a function. If `exp_folder` is not given, a folder-selection dialog
+opens, starting in `scape_utils.MAIN_PATH`, with the newest (`YYYYMMDD_...`) folders on top.
 The number of volumes loaded per batch when computing projections is chosen automatically
 from each run's volume size, unless given with -b. With -o/--overwrite, projections are
 recomputed even if they already exist.
@@ -31,14 +47,20 @@ save_HR_deskewed_tif: deskew a converted HR nrrd and save it as a calibrated OME
 convert_HR_folders: convert all sample#_run#_HR subfolders of an experiment folder to a
     single (not deskewed) nrrd each, delete their raw .dat files, and save a deskewed
     OME-TIFF of each (see save_HR_deskewed_tif).
+collect_activity_plots: move the runs' `analysis/activity.png` plots of a long-recording
+    experiment into `<exp_folder>/00_activity/`, named with the hours APF.
 preprocess_scape_exp: main function, converts the HR folders (see convert_HR_folders), then
     lists and preprocesses all other sample#_run# subfolders of an experiment folder, and
-    combines projections per sample (for samples with more than one run).
+    combines projections per sample (for samples with more than one run); with live=True,
+    preprocesses the runs as they are transferred and combines them at the end.
 """
 
 import argparse
+import datetime
 import os
 import re
+import shutil
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
@@ -48,6 +70,11 @@ import scapeio
 import tifffile
 
 import scape_utils
+from common.dialogs import sort_dialog_descending
+
+ACT_FOLDER = '00_activity'  # in the experiment folder (long recordings)
+LIVE_POLL = 60              # live mode: seconds between checks for new runs
+LIVE_TIMEOUT_HOURS = 3      # live mode: stop after this long without a new run
 
 
 def _sample_run_sort_key(scape_path: Path) -> tuple[int, int]:
@@ -216,9 +243,261 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
         save_HR_deskewed_tif(hr_path)
 
 
+def _get_time_0(exp_folder: str | Path) -> datetime.datetime | None:
+    """
+    Extract the puparium formation time from the name of the experiment folder.
+
+    Uses the last two underscore-delimited tokens of the folder name (expected
+    format `MM-DD_HHhMM`). The year is not encoded, so it is left as 1900 and
+    set per run in `_get_hours_apf()`.
+
+    Parameters
+    ----------
+    exp_folder : str | Path
+        Experiment folder whose name ends with the puparium formation time.
+
+    Returns
+    -------
+    datetime.datetime or None
+        Puparium formation time, or None if the folder name does not match.
+    """
+    try:
+        time_0_str = '_'.join(Path(exp_folder).name.split('_')[-2:])
+        return datetime.datetime.strptime(time_0_str, '%m-%d_%Hh%M')
+    except ValueError:
+        return None
+
+
+def _get_recording_time(scape_path: Path) -> datetime.datetime | None:
+    """
+    Get the start time of a run: `scanStartTimeApprox` from its `_info.mat`
+    (inside the run folder, or next to it as acquired), or else the
+    `_YYYYMMDD_HHMM` at the end of the run folder name.
+
+    Parameters
+    ----------
+    scape_path : Path
+        The `sample#_run#` folder.
+
+    Returns
+    -------
+    datetime.datetime or None
+        Recording time, or None if it can't be found.
+    """
+    for info_path in (scape_path / f'{scape_path.name}_info.mat',
+                      scape_path.parent / f'{scape_path.name}_info.mat'):
+        if not info_path.is_file():
+            continue
+        try:
+            from scipy.io import loadmat
+            info = loadmat(info_path, squeeze_me=True, struct_as_record=False,
+                           variable_names=['info'])['info']
+            return datetime.datetime.strptime(str(info.scanStartTimeApprox),
+                                              '%d-%b-%Y %H:%M:%S')
+        except Exception:
+            break
+    m = re.search(r'_(\d{8})_(\d{4})$', scape_path.name)
+    if m:
+        return datetime.datetime.strptime(m[1] + m[2], '%Y%m%d%H%M')
+    return None
+
+
+def _get_hours_apf(scape_path: Path,
+                   time_0: datetime.datetime | None) -> int | None:
+    """
+    Calculate the hours after puparium formation (APF) of a run.
+
+    `time_0` carries no year, so it is given the recording's year (or the year
+    before, if that would put it after the recording, e.g. across New Year).
+
+    Parameters
+    ----------
+    scape_path : Path
+        The `sample#_run#` folder (see `_get_recording_time()`).
+    time_0 : datetime.datetime or None
+        Puparium formation time, see `_get_time_0()`.
+
+    Returns
+    -------
+    int or None
+        Hours APF, rounded to the nearest hour, or None if either time is
+        unknown.
+    """
+    time_t = _get_recording_time(scape_path)
+    if time_0 is None or time_t is None:
+        return None
+    t0 = time_0.replace(year=time_t.year)
+    if t0 > time_t:
+        t0 = t0.replace(year=time_t.year - 1)
+    return int(np.round((time_t - t0).total_seconds() / 3600))
+
+
+def _get_activity_path(exp_folder: Path,
+                       scape_path: Path,
+                       time_0: datetime.datetime | None) -> Path:
+    """
+    Get the save path of the activity plot of a run of a long recording:
+    `<exp_folder>/00_activity/<run name>_<hours>hAPF.png` (without the hAPF
+    if it is unknown), e.g. `sample1_run03_20261023_1825_55hAPF.png`.
+    """
+    hours = _get_hours_apf(scape_path, time_0)
+    name = scape_path.name + (f'_{hours}hAPF' if hours is not None else '')
+    return exp_folder / ACT_FOLDER / (name + '.png')
+
+
+def collect_activity_plots(exp_folder: str | Path) -> None:
+    """
+    Move the activity plot of every `sample#_run#` folder of a long-recording
+    experiment (`<run>/analysis/activity.png`) into `<exp_folder>/00_activity/`,
+    named with its hours APF (see `_get_activity_path()`). Does nothing if the
+    experiment folder name does not end with the puparium formation time
+    (`..._MM-DD_HHhMM`).
+
+    Parameters
+    ----------
+    exp_folder : str | Path
+        Path to the experiment folder.
+
+    Returns
+    -------
+    None
+    """
+    exp_folder = Path(exp_folder)
+    time_0 = _get_time_0(exp_folder)
+    if time_0 is None:
+        return
+    n_moved = 0
+    for scape_path in sorted(exp_folder.iterdir(), key=lambda p: p.name):
+        old_path = scape_path / scape_utils.ANALYSIS_PATH_NAME / 'activity.png'
+        if (not scape_path.name.startswith('sample') or '_run' not in scape_path.name
+                or not old_path.is_file()):
+            continue
+        new_path = _get_activity_path(exp_folder, scape_path, time_0)
+        new_path.parent.mkdir(exist_ok=True)
+        shutil.move(old_path, new_path)
+        n_moved += 1
+    if n_moved:
+        print(f'Moved {n_moved} activity plots to {exp_folder / ACT_FOLDER}')
+
+
+def _list_run_folders(exp_folder: Path) -> list[Path]:
+    """
+    List the `sample#_run#` folders of an experiment (not the `_HR` ones),
+    sorted by sample# then run#.
+    """
+    return sorted((p for p in exp_folder.iterdir()
+                   if p.is_dir() and p.name.startswith('sample') and '_run' in p.name
+                   and not p.name.endswith('_HR')),
+                  key=_sample_run_sort_key)
+
+
+def _is_transferred(scape_path: Path) -> bool:
+    """
+    Whether a run has been fully transferred to the server: its `_info.mat`,
+    which `transfer_scape_recordings.py` moves last, is inside the run folder
+    (or next to it, as acquired).
+    """
+    info_name = f'{scape_path.name}_info.mat'
+    return (scape_path / info_name).is_file() or (scape_path.parent / info_name).is_file()
+
+
+def _has_projections(scape_path: Path) -> bool:
+    """
+    Whether the projection images of a run have been computed.
+    """
+    return (scape_path / scape_utils.ANALYSIS_PATH_NAME
+            / scape_utils.PROJECTION_FILE_NAME).exists()
+
+
+def _process_run(exp_folder: Path,
+                 scape_path: Path,
+                 time_0: datetime.datetime | None,
+                 batch_size: int | None,
+                 overwrite: bool) -> None:
+    """
+    Fix the folder structure of one run and compute its projection images,
+    unless they exist already (and not `overwrite`). For long recordings
+    (`time_0` known) the activity plot goes to `00_activity` (see
+    `_get_activity_path()`).
+    """
+    scape_utils.check_folder_structure(scape_path)
+    exists = _has_projections(scape_path)
+    if exists and not overwrite:
+        print(f'Projections already found for {scape_path.name}.')
+        return
+    print(f'Projections {"found, overwriting" if exists else "not found"} '
+          f'for {scape_path.name}. Computing them...')
+    activity_path = (_get_activity_path(exp_folder, scape_path, time_0)
+                     if time_0 is not None else None)
+    scape_utils.get_projection_images(scape_path, batch_size=batch_size,
+                                      activity_path=activity_path)
+
+
+def _combine_samples(exp_folder: Path,
+                     scape_paths: list[Path]) -> None:
+    """
+    Combine the projections of the runs in `scape_paths` that have them into
+    one `sample#_combined` folder per sample with more than one such run.
+    """
+    sample_run_paths: dict[str, list[Path]] = {}
+    for scape_path in scape_paths:
+        if _has_projections(scape_path):
+            sample_name = scape_path.name.split('_run')[0]
+            sample_run_paths.setdefault(sample_name, []).append(scape_path)
+    for sample_name, run_paths in sample_run_paths.items():
+        if len(run_paths) > 1:
+            scape_utils.combine_sample_projections(exp_folder, sample_name, run_paths)
+        else:
+            print(f'Only one run for {sample_name}, not creating a {sample_name}_combined folder.')
+
+
+def _preprocess_live(exp_folder: Path,
+                     time_0: datetime.datetime | None,
+                     batch_size: int | None,
+                     overwrite: bool,
+                     timeout_hours: float,
+                     poll: float = LIVE_POLL) -> None:
+    """
+    Preprocess every run of the experiment as soon as it has been fully
+    transferred (see `_is_transferred()`), checking for new runs every `poll`
+    seconds, until no new run has appeared for `timeout_hours` or the user
+    presses Ctrl+C. Then combines the projections of each sample.
+    """
+    done: set[str] = set()   # runs processed (or found processed) in this session
+    last_new = time.time()   # when the last run was processed (or the start)
+    status_shown = False     # True while the one-line waiting status is on screen
+    print(f'Live mode: preprocessing runs as they are transferred, until no new run '
+          f'appears for {timeout_hours:g} h (or Ctrl+C), then combining the samples.')
+    try:
+        while True:
+            todo = [p for p in _list_run_folders(exp_folder)
+                    if p.name not in done and _is_transferred(p)]
+            if todo and status_shown:
+                print()
+                status_shown = False
+            for scape_path in todo:
+                _process_run(exp_folder, scape_path, time_0, batch_size, overwrite)
+                done.add(scape_path.name)
+                last_new = time.time()
+            idle = time.time() - last_new
+            if idle > timeout_hours * 3600:
+                print(f'\nNo new runs for {timeout_hours:g} h, stopping.')
+                break
+            print(f'\r[{datetime.datetime.now():%H:%M:%S}] waiting for new runs '
+                  f'({idle / 3600:.1f} h of {timeout_hours:g} h without one)   ',
+                  end='', flush=True)
+            status_shown = True
+            time.sleep(poll)
+    except KeyboardInterrupt:
+        print('\nStopped by user (Ctrl+C).')
+    _combine_samples(exp_folder, _list_run_folders(exp_folder))
+
+
 def preprocess_scape_exp(exp_folder: str | Path | None = None,
                          batch_size: int | None = None,
-                         overwrite: bool = False) -> None:
+                         overwrite: bool = False,
+                         live: bool = False,
+                         live_timeout: float = LIVE_TIMEOUT_HOURS) -> None:
     """
     Preprocess all SCAPE recordings in an experiment folder.
 
@@ -232,12 +511,24 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
     are done, combines their projections into a new `sample#_combined` folder
     before moving on to the next sample. Samples with a single (kept) run get
     no `sample#_combined` folder.
+    If the experiment folder name ends with the puparium formation time
+    (`..._MM-DD_HHhMM`), run activity plots are saved in (and existing ones
+    moved to) `<exp_folder>/00_activity/`, named with hours APF (see
+    `collect_activity_plots`).
+
+    In live mode (`live=True`), there is no selection prompt: every run is
+    preprocessed as soon as it has been fully transferred to the server by
+    `transfer_scape_recordings.py` (its `_info.mat` is there), new runs are
+    checked for every minute, and once no new run has appeared for
+    `live_timeout` hours, or on Ctrl+C, the runs' projections are combined per
+    sample.
 
     Parameters
     ----------
     exp_folder : str | Path | None
         Path to the experiment folder containing the `sample#_run#` subfolders.
-        If None, a folder-selection dialog opens starting in `scape_utils.MAIN_PATH`.
+        If None, a folder-selection dialog opens starting in `scape_utils.MAIN_PATH`,
+        listing the newest (`YYYYMMDD_...`) folders first.
     batch_size : int | None
         Number of volumes loaded at a time when computing the projection images
         (passed to `scape_utils.get_projection_images`). If None (default), chosen
@@ -247,6 +538,12 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
         If True, recompute the projection images of every kept run even if they
         already exist (the sample#_combined projections are always recomputed).
         Default False.
+    live : bool
+        Keep running and preprocess new runs as they are transferred (see
+        above). Default False.
+    live_timeout : float
+        In live mode, hours without a new run after which the script combines
+        the samples and stops. Default 3.
 
     Returns
     -------
@@ -264,6 +561,7 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
                   'start there.')
         root = tk.Tk()
         root.withdraw()
+        sort_dialog_descending(root)  # newest (YYYYMMDD_...) folders first
         selected = filedialog.askdirectory(initialdir=scape_utils.MAIN_PATH, title='Select experiment folder')
         root.destroy()
         os.chdir(original_cwd)
@@ -272,11 +570,18 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
             return
         exp_folder = selected
     exp_folder = Path(exp_folder)
+    time_0 = _get_time_0(exp_folder)
+    if time_0 is not None:
+        print(f'Long recording (puparium formation at {time_0:%m-%d %H:%M}): activity '
+              f'plots go to {exp_folder / ACT_FOLDER}, named with hours APF.')
+        collect_activity_plots(exp_folder)
 
-    scape_paths = sorted((p for p in exp_folder.iterdir()
-                          if p.is_dir() and p.name.startswith('sample') and '_run' in p.name
-                          and not p.name.endswith('_HR')),
-                         key=_sample_run_sort_key)
+    if live:
+        convert_HR_folders(exp_folder)
+        _preprocess_live(exp_folder, time_0, batch_size, overwrite, live_timeout)
+        return
+
+    scape_paths = _list_run_folders(exp_folder)
 
     print(f'Found {len(scape_paths)} run folders in {exp_folder}:')
     previous_sample_name = None
@@ -301,19 +606,8 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
 
     for sample_name, run_paths in sample_run_paths.items():
         for scape_path in run_paths:
-            scape_utils.check_folder_structure(scape_path)
-            h5_path = scape_path / scape_utils.ANALYSIS_PATH_NAME / scape_utils.PROJECTION_FILE_NAME
-            if h5_path.exists() and not overwrite:
-                print(f'Projections already found for {scape_path.name}.')
-            else:
-                print(f'Projections {"found, overwriting" if h5_path.exists() else "not found"} '
-                      f'for {scape_path.name}. Computing them...')
-                scape_utils.get_projection_images(scape_path, batch_size=batch_size)
-
-        if len(run_paths) > 1:
-            scape_utils.combine_sample_projections(exp_folder, sample_name, run_paths)
-        else:
-            print(f'Only one run for {sample_name}, not creating a {sample_name}_combined folder.')
+            _process_run(exp_folder, scape_path, time_0, batch_size, overwrite)
+        _combine_samples(exp_folder, run_paths)
 
 
 if __name__ == '__main__':
@@ -328,5 +622,14 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--overwrite', action='store_true',
                         help='Recompute the projection images of each kept run even if '
                              'they already exist.')
+    parser.add_argument('-l', '--live', action='store_true',
+                        help='Keep running: preprocess each run as soon as '
+                             'transfer_scape_recordings.py has finished moving it to the '
+                             'server (no selection prompt), and combine the samples once no '
+                             'new run has appeared for --live-timeout hours, or on Ctrl+C.')
+    parser.add_argument('--live-timeout', type=float, default=LIVE_TIMEOUT_HOURS,
+                        help='Hours without a new run after which live mode stops '
+                             f'(default: {LIVE_TIMEOUT_HOURS:g}).')
     args = parser.parse_args()
-    preprocess_scape_exp(args.exp_folder, batch_size=args.batch_size, overwrite=args.overwrite)
+    preprocess_scape_exp(args.exp_folder, batch_size=args.batch_size, overwrite=args.overwrite,
+                         live=args.live, live_timeout=args.live_timeout)

@@ -2,7 +2,8 @@
 Load FlyTrack recordings and their analysis files: lists of .mkv videos, the segment ROIs, masks
 and bounding boxes, timestamps, projections and median frames, and ROI pixels of the videos.
 
-sort_dialog_descending: make a tkinter file dialog list files newest first.
+sort_dialog_descending: make a tkinter file dialog list files newest first (from
+    `common.dialogs`).
 get_mkv_list: list the .mkv videos of a folder (or pick one with a dialog).
 get_mkv_file: pick one .mkv video with a dialog.
 get_hAPF: hours after puparium formation of a recording, from its name.
@@ -24,41 +25,11 @@ import h5py
 import numpy as np
 import tqdm
 
+from common.dialogs import sort_dialog_descending  # noqa: F401 (used as flytrack_io.sort_dialog_descending)
 from common.masks import mask_image
 from common.paths import FLYTRACK_PATH
 
 FRAMES_PER_RECORDING = 24_000  # 10 min x 40 fps x 4 packed frames per file frame
-
-
-def sort_dialog_descending(tk_root: Any) -> None:
-    """
-    Make Tk file dialogs list folders and files in descending (Z-A) order.
-
-    Our recording folders start with a date (``YYYYMMDD_...``), so this shows
-    the newest ones first. Tk's built-in Linux dialog (used by
-    `tkinter.filedialog.askdirectory()` and `askopenfilename()`) has no sort
-    option, so this wraps its internal listing proc
-    ``::tk::dialog::file::GlobFiltered`` to reverse the list it returns. Call it
-    once on the Tk root, before opening the dialog; calling it again does nothing.
-
-    Parameters
-    ----------
-    tk_root : tkinter.Tk
-        The Tk root window the dialog will be opened from.
-
-    Returns
-    -------
-    None
-    """
-    tk_root.tk.eval('''
-        if {[info commands ::tk::dialog::file::GlobFilteredAscending] eq ""} {
-            auto_load ::tk::dialog::file::
-            rename ::tk::dialog::file::GlobFiltered ::tk::dialog::file::GlobFilteredAscending
-            proc ::tk::dialog::file::GlobFiltered {args} {
-                lreverse [uplevel 1 [list ::tk::dialog::file::GlobFilteredAscending {*}$args]]
-            }
-        }
-    ''')
 
 
 def get_mkv_list(folder_path: str | Path | None = None) -> list[str]:

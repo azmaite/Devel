@@ -9,5 +9,6 @@ Helpers shared by several pipelines, installed as the `common` package (see the 
 - `nmf.py`: non-negative matrix factorisation of flattened frames into temporal and spatial
   components, with the frame normalisation and selection used before it.
 - `plotting.py`: plot temporal and spatial components.
+- `dialogs.py`: make tkinter file dialogs list folders newest first (`sort_dialog_descending`).
 
 FlyTrack-specific loaders (mkv lists, timestamps, ROIs) are in `flytrack/flytrack_io.py`.

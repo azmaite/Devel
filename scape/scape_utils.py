@@ -38,7 +38,8 @@ get_projection_images: compute the std, maximum, and minimum projection images, 
     video. Saves the projections, activity trace, and voxel size (`voxel_sizes_xyz`) in
     the analysis folder, both in an h5 file and as OME-TIFFs (projections) / a PNG plot
     (activity) calibrated with the recording's voxel size / volume rate for napari and
-    easy viewing
+    easy viewing (the activity PNG can be saved elsewhere, e.g. the experiment's
+    `00_activity` folder, see `preprocess_scape_exp`)
 combine_sample_projections: combine projection images and activity traces from several
     runs of the same sample and save them (as h5, OME-TIFFs, and a combined activity PNG
     with dotted lines marking run boundaries) to a new sample#_combined folder, recording
@@ -333,7 +334,8 @@ def get_auto_batch_size(scape_path: str | Path) -> int:
     return batch_size
 
 
-def get_projection_images(scape_path: str | Path, batch_size: int | None = None):
+def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
+                          activity_path: str | Path | None = None):
     """
     Get the std, maximum and minimum projection images, and the activity trace
     (mean fluorescence per volume, ignoring zero voxels as if they were nan),
@@ -344,7 +346,7 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None)
     Also saves `std_image`, `min_proj`, and `max_proj` as OME-TIFFs
     (`{proj_type}.ome.tif`), calibrated with the recording's voxel size
     (see `load_voxel_size`) so they open correctly scaled in napari, and the
-    activity trace as `activity.png` (see `_plot_activity`).
+    activity trace as `activity.png` (see `_plot_activity`), or at `activity_path`.
 
     Parameters
     ----------
@@ -359,6 +361,10 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None)
         A last batch holding a single
         volume is handled correctly (scapeio returns it without a time axis,
         which is re-added here).
+    activity_path : str | Path | None
+        Where to save the activity plot. If None (default), `activity.png` in
+        the analysis folder (`preprocess_scape_exp` passes a path in the
+        experiment's `00_activity` folder for long recordings).
     """
     # set save path
     scape_path = Path(scape_path)
@@ -467,7 +473,10 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None)
 
     # also plot and save the activity trace over time
     time_axis = np.arange(len(activity)) / scan_rate
-    _plot_activity(activity, time_axis, analysis_path / 'activity.png',
+    if activity_path is None:
+        activity_path = analysis_path / 'activity.png'
+    Path(activity_path).parent.mkdir(parents=True, exist_ok=True)
+    _plot_activity(activity, time_axis, activity_path,
                   title=f'Average fluorescence over time ({scape_path.name})')
 
 def _plot_activity(activity: np.ndarray, time_axis: np.ndarray, save_path: str | Path,
