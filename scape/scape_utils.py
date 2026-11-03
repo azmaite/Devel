@@ -43,7 +43,8 @@ get_projection_images: compute the std, maximum, and minimum projection images, 
 combine_sample_projections: combine projection images and activity traces from several
     runs of the same sample and save them (as h5, OME-TIFFs, and a combined activity PNG
     with dotted lines marking run boundaries) to a new sample#_combined folder, recording
-    the combined runs' names as a `source_runs` attribute on the h5 file
+    the combined runs' names as a `source_runs` attribute on the h5 file (runs whose
+    projection shape differs from the majority, e.g. a short test scan, are skipped)
 _plot_activity: plot an activity trace (mean fluorescence per volume) over time and save
     it as a PNG, optionally marking run boundaries with vertical dotted lines
 """
@@ -53,6 +54,7 @@ import numpy as np
 import scapeio
 import tifffile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 import tqdm
 import h5py
@@ -524,6 +526,11 @@ def combine_sample_projections(exp_folder: str | Path, sample_name: str, run_pat
     `sample#_run#` folders are saved as a `source_runs` attribute on the
     h5 file, in the same order they were combined.
 
+    Only runs whose projections have the most common shape among `run_paths`
+    are combined; any others (e.g. a short test scan with different scan
+    settings) are skipped with a warning. If fewer than two runs remain, no
+    `sample#_combined` folder is created.
+
     Parameters
     ----------
     exp_folder : str | Path
@@ -534,6 +541,26 @@ def combine_sample_projections(exp_folder: str | Path, sample_name: str, run_pat
         Paths to the `sample#_run#` folders to combine.
     """
     exp_folder = Path(exp_folder)
+
+    # only runs with the most common projection shape can be combined (e.g. a short
+    # test scan with a different number of galvo steps is skipped)
+    run_shapes = {}
+    for scape_path in run_paths:
+        with h5py.File(analysis_path_for(scape_path) / PROJECTION_FILE_NAME, 'r') as f:
+            run_shapes[scape_path] = f['sum_x'].shape
+    shape_counts = Counter(run_shapes.values())
+    main_shape = max(shape_counts, key=shape_counts.get)
+    skipped = [p for p in run_paths if run_shapes[p] != main_shape]
+    for scape_path in skipped:
+        print(f'Warning: skipping {scape_path.name} when combining {sample_name}: its '
+              f'projection shape {run_shapes[scape_path]} differs from the other runs '
+              f'({main_shape}).')
+    run_paths = [p for p in run_paths if run_shapes[p] == main_shape]
+    if len(run_paths) < 2:
+        print(f'Fewer than two runs of {sample_name} with matching projection shapes, '
+              f'not creating a {sample_name}_combined folder.')
+        return
+
     combined_path = exp_folder / f'{sample_name}_combined'
     combined_path.mkdir(exist_ok=True)
 
