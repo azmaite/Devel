@@ -29,8 +29,10 @@ load_voxel_size: get voxel size of a deskewed scape 3D video (XYZ). For a sample
     folder, read back from its max_proj.ome.tif metadata instead of raw data, which it
     doesn't have.
 load_aspect_ratio_YX: get aspect ratio of a scape 3D video for Y/X (most common view)
-load_proj: load the specified projection ('max_proj', 'min_proj', or 'std_image') of a
-    SCAPE 3D video. If not already calculated, will compute and save all projection images.
+load_proj: load the specified projection ('max_proj', 'min_proj', 'std_image' or
+    'median_proj') of a SCAPE 3D video. If not already calculated, will compute and save all
+    projection images (a missing 'median_proj' is computed on its own, see
+    get_median_projection).
 get_auto_batch_size: choose the number of volumes to load per batch from the recording's
     volume size (raw voxels per volume), to keep memory use roughly constant
 get_projection_images: compute the std, maximum, and minimum projection images, and an
@@ -39,18 +41,31 @@ get_projection_images: compute the std, maximum, and minimum projection images, 
     the analysis folder, both in an h5 file and as OME-TIFFs (projections) / a PNG plot
     (activity) calibrated with the recording's voxel size / volume rate for napari and
     easy viewing (the activity PNG can be saved elsewhere, e.g. the experiment's
-    `00_activity` folder, see `preprocess_scape_exp`)
+    `00_activity` folder, see `preprocess_scape_exp`). Optionally (`median=True`) also the
+    median projection, in the same pass
+get_median_projection: compute only the median projection of a SCAPE 3D video and add it
+    to its projection_images.h5 (and as an OME-TIFF), e.g. for runs whose other projections
+    were computed before the median was added. The median needs every volume of the
+    recording for each voxel, so the deskewed volumes are kept in RAM if they fit, else in a
+    temporary memmap on the local disk (see _MedianStack)
 combine_sample_projections: combine projection images and activity traces from several
     runs of the same sample and save them (as h5, OME-TIFFs, and a combined activity PNG
     with dotted lines marking run boundaries) to a new sample#_combined folder, recording
     the combined runs' names as a `source_runs` attribute on the h5 file (runs whose
-    projection shape differs from the majority, e.g. a short test scan, are skipped)
+    projection shape differs from the majority, e.g. a short test scan, are skipped). The
+    median projection can't be combined from the runs' medians, so the combined folder has
+    none
 _plot_activity: plot an activity trace (mean fluorescence per volume) over time and save
     it as a PNG, optionally marking run boundaries with vertical dotted lines
 """
 
+import os
+import shutil
+import tempfile
+
 import nrrd
 import numpy as np
+import psutil
 import scapeio
 import tifffile
 import xml.etree.ElementTree as ET
@@ -68,6 +83,8 @@ MAIN_PATH = str(SCAPE_PATH)
 ANALYSIS_PATH_NAME = "analysis"
 PROJECTION_FILE_NAME = "projection_images.h5"
 AUTO_BATCH_VOXELS = 1.4e9 # raw voxels loaded per batch by get_auto_batch_size
+MEDIAN_RAM_FRACTION = 0.5 # median stack kept in RAM if under this fraction of available RAM
+MEDIAN_SLAB_BYTES = 1e9   # bytes of the median stack processed at a time
 
 
 def load_napari_rois(roi_path: str | Path) -> np.ndarray:
@@ -273,7 +290,8 @@ def load_proj(scape_path: str | Path, proj_type: str) -> np.ndarray:
     scape_path : str | Path
         Path to the folder containing the SCAPE data.
     proj_type : str
-        Type of projection to load. Can be 'max_proj', 'min_proj', or 'std_image'.
+        Type of projection to load. Can be 'max_proj', 'min_proj', 'std_image' or
+        'median_proj'.
 
     Returns
     -------
@@ -281,7 +299,8 @@ def load_proj(scape_path: str | Path, proj_type: str) -> np.ndarray:
         Specified projection of the image along the z-axis.
         Also saved in the analysis folder as '{proj_type}_proj.'.
     """
-    assert proj_type in ['max_proj', 'min_proj', 'std_image'], f"proj_type must be one of 'max_proj', 'min_proj', or 'std_image'. Got {proj_type} instead."
+    proj_types = ['max_proj', 'min_proj', 'std_image', 'median_proj']
+    assert proj_type in proj_types, f"proj_type must be one of {proj_types}. Got {proj_type} instead."
 
     scape_path = Path(scape_path)
     check_folder_structure(scape_path)
@@ -289,7 +308,13 @@ def load_proj(scape_path: str | Path, proj_type: str) -> np.ndarray:
 
     if not h5_path.exists():
         print(f"Projection images not found. Computing them...")
-        get_projection_images(scape_path)
+        get_projection_images(scape_path, median=proj_type == 'median_proj')
+    if proj_type == 'median_proj':
+        with h5py.File(h5_path, 'r') as f:
+            has_median = 'median_proj' in f
+        if not has_median:
+            print(f"Median projection not found. Computing it...")
+            get_median_projection(scape_path)
 
     with h5py.File(h5_path, 'r') as f:
         proj = f[proj_type][:]
@@ -336,8 +361,157 @@ def get_auto_batch_size(scape_path: str | Path) -> int:
     return batch_size
 
 
+def _tiff_metadata(voxel_size: dict) -> dict:
+    """
+    OME metadata of a projection OME-TIFF (axes ZYX, i.e. the h5 arrays
+    transposed with `.transpose(0, 2, 1)`), calibrated with `voxel_size` (see
+    `load_voxel_size`), so it opens correctly scaled in napari.
+    """
+    return {'axes': 'ZYX',
+            'PhysicalSizeX': voxel_size['x'], 'PhysicalSizeXUnit': 'um',
+            'PhysicalSizeY': voxel_size['y'], 'PhysicalSizeYUnit': 'um',
+            'PhysicalSizeZ': voxel_size['z'], 'PhysicalSizeZUnit': 'um'}
+
+
+def _deskewed_batches(scape_path: Path,
+                      batch_size: int | None,
+                      desc: str):
+    """
+    Load and deskew the volumes of a recording, a batch at a time.
+
+    Parameters
+    ----------
+    scape_path : Path
+        A single `sample#_run#` folder (folder structure already checked).
+    batch_size : int | None
+        Number of volumes per batch; None: see `get_auto_batch_size`.
+    desc : str
+        Description of the progress bar.
+
+    Yields
+    ------
+    tuple[int, np.ndarray]
+        Index of the first volume of the batch, and the deskewed batch
+        (time, z, x, y), as returned by scapeio (uint16). A batch of a single
+        volume, which scapeio returns without a time axis, gets it back.
+    """
+    if batch_size is None:
+        batch_size = get_auto_batch_size(scape_path)
+    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio.load_scan
+    _, num_volumes, _ = scapeio.get_scan_timing(scape_raw_path)
+    for start_volume in tqdm.tqdm(range(0, num_volumes, batch_size), desc=desc):
+        end_volume = min(start_volume + batch_size, num_volumes)
+        print(f'Loading volumes {start_volume} to {end_volume}...')
+        video_batch, axis_order = scapeio.load_scan(scape_raw_path, colors=1,
+                                                    start_volume=start_volume,
+                                                    end_volume=end_volume - 1,
+                                                    return_axis_order=True)
+        if 't' not in axis_order:
+            # scapeio drops the time axis when a batch holds a single volume (e.g. a
+            # last batch of 1 volume); restore it so axis 0 is always time
+            video_batch = video_batch[np.newaxis]
+        deskewed_batch = scapeio.operations.deskew_scan(scape_raw_path, images=video_batch)
+        del video_batch
+        yield start_volume, deskewed_batch
+
+
+class _MedianStack:
+    """
+    All the deskewed volumes of a recording, filled batch by batch, to take
+    their median over time voxel by voxel. Kept in RAM if the stack takes less
+    than `MEDIAN_RAM_FRACTION` of the available RAM, else in a temporary
+    memmap on the local disk (in `tempfile.gettempdir()`, deleted by `close`).
+    The median is then taken one slab along z at a time (`MEDIAN_SLAB_BYTES`).
+    """
+
+    def __init__(self,
+                 num_volumes: int,
+                 volume_shape: tuple,
+                 dtype: np.dtype,
+                 name: str):
+        """
+        Parameters
+        ----------
+        num_volumes : int
+            Number of volumes of the recording.
+        volume_shape : tuple
+            Shape of one deskewed volume (z, x, y).
+        dtype : np.dtype
+            Data type of the deskewed volumes.
+        name : str
+            Name of the recording (for messages and the memmap file name).
+        """
+        shape = (num_volumes, *volume_shape)
+        nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+        available_ram = psutil.virtual_memory().available
+        self.path = None
+        if nbytes < MEDIAN_RAM_FRACTION * available_ram:
+            print(f'Median of {name}: keeping the {nbytes / 1e9:.1f} GB stack in RAM.')
+            self.stack = np.empty(shape, dtype)
+            return
+        temp_dir = tempfile.gettempdir()
+        free_disk = shutil.disk_usage(temp_dir).free
+        if nbytes > 0.95 * free_disk:
+            raise MemoryError(f'Median of {name}: the {nbytes / 1e9:.1f} GB stack fits neither '
+                              f'in RAM ({available_ram / 1e9:.1f} GB available) nor on the '
+                              f'local disk ({free_disk / 1e9:.1f} GB free in {temp_dir}).')
+        handle, path = tempfile.mkstemp(prefix=f'median_{name}_', suffix='.dat')
+        os.close(handle)
+        self.path = Path(path)
+        print(f'Median of {name}: the {nbytes / 1e9:.1f} GB stack does not fit in RAM, '
+              f'using a temporary memmap ({self.path}).')
+        self.stack = np.memmap(self.path, dtype=dtype, mode='w+', shape=shape)
+
+    def add(self,
+            start_volume: int,
+            batch: np.ndarray) -> None:
+        """
+        Store a batch of deskewed volumes (time first) starting at volume
+        `start_volume`.
+        """
+        self.stack[start_volume:start_volume + batch.shape[0]] = batch
+
+    def median(self) -> np.ndarray:
+        """
+        Median over time of every voxel (float32; for an even number of
+        volumes, the mean of the two middle values).
+        """
+        num_volumes, depth = self.stack.shape[:2]
+        slab_bytes = num_volumes * int(np.prod(self.stack.shape[2:])) * self.stack.itemsize
+        slab = max(1, int(MEDIAN_SLAB_BYTES // slab_bytes))
+        median = np.empty(self.stack.shape[1:], np.float32)
+        for z in tqdm.tqdm(range(0, depth, slab), desc='Median over time'):
+            median[z:z + slab] = np.median(np.asarray(self.stack[:, z:z + slab]), axis=0)
+        return median
+
+    def close(self) -> None:
+        """
+        Free the stack and delete the memmap file, if any.
+        """
+        del self.stack
+        if self.path is not None:
+            self.path.unlink(missing_ok=True)
+
+
+def _save_median(analysis_path: Path,
+                 median_proj: np.ndarray,
+                 voxel_size: dict) -> None:
+    """
+    Save the median projection in the analysis folder's projection_images.h5
+    (`median_proj`) and as `median_proj.ome.tif`.
+    """
+    with h5py.File(analysis_path / PROJECTION_FILE_NAME, 'a') as f:
+        if 'median_proj' in f:
+            del f['median_proj']
+        f.create_dataset('median_proj', data=median_proj)
+    tifffile.imwrite(analysis_path / 'median_proj.ome.tif', median_proj.transpose(0, 2, 1),
+                     ome=True, metadata=_tiff_metadata(voxel_size))
+    print(f'Saved median_proj to {analysis_path / PROJECTION_FILE_NAME} and as an OME-TIFF')
+
+
 def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
-                          activity_path: str | Path | None = None):
+                          activity_path: str | Path | None = None,
+                          median: bool = False):
     """
     Get the std, maximum and minimum projection images, and the activity trace
     (mean fluorescence per volume, ignoring zero voxels as if they were nan),
@@ -349,6 +523,8 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
     (`{proj_type}.ome.tif`), calibrated with the recording's voxel size
     (see `load_voxel_size`) so they open correctly scaled in napari, and the
     activity trace as `activity.png` (see `_plot_activity`), or at `activity_path`.
+    With `median=True`, the median projection is computed in the same pass and
+    saved too (`median_proj`, see `get_median_projection`).
 
     Parameters
     ----------
@@ -367,6 +543,11 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
         Where to save the activity plot. If None (default), `activity.png` in
         the analysis folder (`preprocess_scape_exp` passes a path in the
         experiment's `00_activity` folder for long recordings).
+    median : bool
+        Also compute the median projection, which needs every volume at once
+        (in RAM, or a temporary memmap on the local disk, see `_MedianStack`),
+        so only for short recordings. If there is room for neither, the median
+        is skipped with a warning. Default False.
     """
     # set save path
     scape_path = Path(scape_path)
@@ -381,60 +562,59 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
     sum_x2: np.ndarray | None = None
     min_proj: np.ndarray | None = None
     max_proj: np.ndarray | None = None
+    median_stack: _MedianStack | None = None
     frame_count = 0
     activity_batches = []
 
-    if batch_size is None:
-        batch_size = get_auto_batch_size(scape_path)
-
-    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio.load_scan
+    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio
     _, num_volumes, scan_rate = scapeio.get_scan_timing(scape_raw_path)
 
-    for i in tqdm.tqdm(range(0, num_volumes, batch_size),
-                       desc=f'Computing projection images ({scape_path.name})'):
-        start_volume = i
-        end_volume = min(i + batch_size, num_volumes)
-        print(f'Loading volumes {start_volume} to {end_volume}...')
-        video_batch, axis_order = scapeio.load_scan(scape_raw_path, colors=1,
-                                                    start_volume=start_volume,
-                                                    end_volume=end_volume - 1,
-                                                    return_axis_order=True)
-        if 't' not in axis_order:
-            # scapeio drops the time axis when a batch holds a single volume (e.g. a
-            # last batch of 1 volume); restore it so axis 0 is always time
-            video_batch = video_batch[np.newaxis]
+    try:
+        for start_volume, deskewed_batch in _deskewed_batches(
+                scape_path, batch_size, f'Computing projection images ({scape_path.name})'):
+            if median and median_stack is None:
+                try:
+                    median_stack = _MedianStack(num_volumes, deskewed_batch.shape[1:],
+                                                deskewed_batch.dtype, scape_path.name)
+                except MemoryError as error:
+                    print(f'Warning: {error} Skipping the median projection.')
+                    median = False
+            if median:
+                median_stack.add(start_volume, deskewed_batch)
+            deskewed_batch = deskewed_batch.astype(np.float32)
 
-        deskewed_batch = scapeio.operations.deskew_scan(scape_raw_path, images=video_batch)
-        deskewed_batch = deskewed_batch.astype(np.float32)
-        del video_batch
+            if max_proj is None:
+                max_proj = np.max(deskewed_batch, axis=0)
+            else:
+                max_proj = np.maximum(max_proj, np.max(deskewed_batch, axis=0))
 
-        if max_proj is None:
-            max_proj = np.max(deskewed_batch, axis=0)
-        else:
-            max_proj = np.maximum(max_proj, np.max(deskewed_batch, axis=0))
+            if min_proj is None:
+                min_proj = np.min(deskewed_batch, axis=0)
+            else:
+                min_proj = np.minimum(min_proj, np.min(deskewed_batch, axis=0))
 
-        if min_proj is None:
-            min_proj = np.min(deskewed_batch, axis=0)
-        else:
-            min_proj = np.minimum(min_proj, np.min(deskewed_batch, axis=0))
+            if sum_x is None:
+                sum_x = np.sum(deskewed_batch, axis=0)
+                sum_x2 = np.sum(deskewed_batch ** 2, axis=0)
+            else:
+                sum_x += np.sum(deskewed_batch, axis=0)
+                sum_x2 += np.sum(deskewed_batch ** 2, axis=0)
+            frame_count += deskewed_batch.shape[0]
 
-        if sum_x is None:
-            sum_x = np.sum(deskewed_batch, axis=0)
-            sum_x2 = np.sum(deskewed_batch ** 2, axis=0)
-        else:
-            sum_x += np.sum(deskewed_batch, axis=0)
-            sum_x2 += np.sum(deskewed_batch ** 2, axis=0)
-        frame_count += deskewed_batch.shape[0]
+            # per-volume mean fluorescence, ignoring zero voxels as if they were nan
+            # (zeros don't contribute to the sum, so only the nonzero count matters)
+            spatial_axes = tuple(range(1, deskewed_batch.ndim))
+            nonzero_sum = np.sum(deskewed_batch, axis=spatial_axes)
+            nonzero_count = np.count_nonzero(deskewed_batch, axis=spatial_axes)
+            with np.errstate(invalid='ignore'):
+                activity_batches.append(nonzero_sum / nonzero_count)
 
-        # per-volume mean fluorescence, ignoring zero voxels as if they were nan
-        # (zeros don't contribute to the sum, so only the nonzero count matters)
-        spatial_axes = tuple(range(1, deskewed_batch.ndim))
-        nonzero_sum = np.sum(deskewed_batch, axis=spatial_axes)
-        nonzero_count = np.count_nonzero(deskewed_batch, axis=spatial_axes)
-        with np.errstate(invalid='ignore'):
-            activity_batches.append(nonzero_sum / nonzero_count)
+            del deskewed_batch
 
-        del deskewed_batch
+        median_proj = median_stack.median() if median_stack is not None else None
+    finally:
+        if median_stack is not None:
+            median_stack.close()
 
     mean = sum_x / frame_count
     mean_sq = sum_x2 / frame_count
@@ -464,14 +644,13 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
 
     # also save std_image, min_proj and max_proj as OME-TIFFs, calibrated with the
     # recording's voxel size, so they open correctly scaled in napari
-    tiff_metadata = {'axes': 'ZYX',
-                     'PhysicalSizeX': voxel_size['x'], 'PhysicalSizeXUnit': 'um',
-                     'PhysicalSizeY': voxel_size['y'], 'PhysicalSizeYUnit': 'um',
-                     'PhysicalSizeZ': voxel_size['z'], 'PhysicalSizeZUnit': 'um'}
+    tiff_metadata = _tiff_metadata(voxel_size)
     for proj_type, data in (('std_image', std_image), ('min_proj', min_proj), ('max_proj', max_proj)):
         tiff_path = analysis_path / f'{proj_type}.ome.tif'
         tifffile.imwrite(tiff_path, data.transpose(0, 2, 1), ome=True, metadata=tiff_metadata)
     print(f'Saved std_image, min_proj, max_proj as OME-TIFFs to {analysis_path}')
+    if median_proj is not None:
+        _save_median(analysis_path, median_proj, voxel_size)
 
     # also plot and save the activity trace over time
     time_axis = np.arange(len(activity)) / scan_rate
@@ -480,6 +659,57 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
     Path(activity_path).parent.mkdir(parents=True, exist_ok=True)
     _plot_activity(activity, time_axis, activity_path,
                   title=f'Average fluorescence over time ({scape_path.name})')
+
+
+def get_median_projection(scape_path: str | Path,
+                          batch_size: int | None = None) -> np.ndarray:
+    """
+    Compute only the median projection (median over time of every voxel) of a
+    SCAPE 3D video, and add it to the analysis folder's projection_images.h5
+    (`median_proj`, (z, x, y) like the other projections) and as
+    `median_proj.ome.tif`. For runs whose other projections were computed
+    without it (see `get_projection_images` to compute them all in one pass).
+
+    Unlike the min/max/std, the median needs every volume for each voxel: the
+    deskewed volumes are kept in RAM if they fit, else in a temporary memmap on
+    the local disk (see `_MedianStack`), so this is meant for short recordings.
+
+    Parameters
+    ----------
+    scape_path : str | Path
+        A single `sample#_run#` folder (not a `sample#_combined` one).
+    batch_size : int | None
+        Number of volumes to load per batch. If None (default), chosen
+        automatically from the volume size (see `get_auto_batch_size`).
+
+    Returns
+    -------
+    np.ndarray
+        The median projection (float32).
+    """
+    scape_path = Path(scape_path)
+    if is_combined_path(scape_path):
+        raise ValueError(f'{scape_path} is a sample#_combined folder, which has no raw data '
+                         f'of its own.')
+    check_folder_structure(scape_path)
+    _, num_volumes, _ = scapeio.get_scan_timing(str(scape_path / scape_path.name))
+    median_stack = None
+    try:
+        for start_volume, deskewed_batch in _deskewed_batches(
+                scape_path, batch_size, f'Computing median projection ({scape_path.name})'):
+            if median_stack is None:
+                median_stack = _MedianStack(num_volumes, deskewed_batch.shape[1:],
+                                            deskewed_batch.dtype, scape_path.name)
+            median_stack.add(start_volume, deskewed_batch)
+            del deskewed_batch
+        median_proj = median_stack.median()
+    finally:
+        if median_stack is not None:
+            median_stack.close()
+    analysis_path = scape_path / ANALYSIS_PATH_NAME
+    analysis_path.mkdir(exist_ok=True)
+    _save_median(analysis_path, median_proj, load_voxel_size(scape_path))
+    return median_proj
 
 def _plot_activity(activity: np.ndarray, time_axis: np.ndarray, save_path: str | Path,
                    title: str, run_boundaries: list[float] | None = None):
@@ -623,11 +853,7 @@ def combine_sample_projections(exp_folder: str | Path, sample_name: str, run_pat
         f.attrs['source_runs'] = [scape_path.name for scape_path in run_paths]
     print(f'Saved combined min_proj, max_proj, sum_x, sum_x2, frame_count, std_image, activity to {h5_path}')
 
-    voxel_size = load_voxel_size(run_paths[0])
-    tiff_metadata = {'axes': 'ZYX',
-                     'PhysicalSizeX': voxel_size['x'], 'PhysicalSizeXUnit': 'um',
-                     'PhysicalSizeY': voxel_size['y'], 'PhysicalSizeYUnit': 'um',
-                     'PhysicalSizeZ': voxel_size['z'], 'PhysicalSizeZUnit': 'um'}
+    tiff_metadata = _tiff_metadata(load_voxel_size(run_paths[0]))
     for proj_type, data in (('std_image', std_image), ('min_proj', min_proj), ('max_proj', max_proj)):
         tiff_path = combined_path / f'{proj_type}.ome.tif'
         tifffile.imwrite(tiff_path, data.transpose(0, 2, 1), ome=True, metadata=tiff_metadata)

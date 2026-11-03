@@ -14,7 +14,10 @@ which indices to keep (supports ranges, e.g. '2-5,7,9-12').
 Then, sample by sample, goes run by run and checks:
 - if the folder structure is correct (raw data inside a sub-subfolder)
 - if the max/min/std projections have been calculated already
-If either of these have not been done, it does it.
+- for runs with fewer than 75 volumes (MEDIAN_MAX_VOLUMES), if the median projection has
+  been calculated already (it needs all the volumes at once, so longer runs get none)
+If any of these have not been done, it does it (a missing median alone is computed
+without recomputing the other projections).
 Once all runs for a sample are done, if the sample has more than one (kept) run, it
 creates a new folder called sample#_combined and combines all the projections for that
 sample, before moving on to the next sample. Samples with a single run get no
@@ -65,6 +68,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
 
+import h5py
 import numpy as np
 import scapeio
 import tifffile
@@ -73,6 +77,7 @@ import scape_utils
 from common.dialogs import sort_dialog_descending
 
 ACT_FOLDER = '00_activity'  # in the experiment folder (long recordings)
+MEDIAN_MAX_VOLUMES = 75     # runs with fewer volumes also get a median projection
 LIVE_POLL = 60              # live mode: seconds between checks for new runs
 LIVE_TIMEOUT_HOURS = 3      # live mode: stop after this long without a new run
 
@@ -409,6 +414,25 @@ def _has_projections(scape_path: Path) -> bool:
             / scape_utils.PROJECTION_FILE_NAME).exists()
 
 
+def _has_median(scape_path: Path) -> bool:
+    """
+    Whether the median projection of a run has been computed (see
+    `scape_utils.get_median_projection`).
+    """
+    with h5py.File(scape_path / scape_utils.ANALYSIS_PATH_NAME
+                   / scape_utils.PROJECTION_FILE_NAME, 'r') as f:
+        return 'median_proj' in f
+
+
+def _wants_median(scape_path: Path) -> bool:
+    """
+    Whether a run is short enough (fewer than `MEDIAN_MAX_VOLUMES` volumes) to
+    get a median projection.
+    """
+    _, num_volumes, _ = scapeio.get_scan_timing(str(scape_path / scape_path.name))
+    return num_volumes < MEDIAN_MAX_VOLUMES
+
+
 def _process_run(exp_folder: Path,
                  scape_path: Path,
                  time_0: datetime.datetime | None,
@@ -416,21 +440,29 @@ def _process_run(exp_folder: Path,
                  overwrite: bool) -> None:
     """
     Fix the folder structure of one run and compute its projection images,
-    unless they exist already (and not `overwrite`). For long recordings
-    (`time_0` known) the activity plot goes to `00_activity` (see
-    `_get_activity_path()`).
+    unless they exist already (and not `overwrite`). Runs with fewer than
+    `MEDIAN_MAX_VOLUMES` volumes also get the median projection (computed on
+    its own if only it is missing). For long recordings (`time_0` known) the
+    activity plot goes to `00_activity` (see `_get_activity_path()`).
     """
     scape_utils.check_folder_structure(scape_path)
+    median = _wants_median(scape_path)
     exists = _has_projections(scape_path)
     if exists and not overwrite:
-        print(f'Projections already found for {scape_path.name}.')
+        if median and not _has_median(scape_path):
+            print(f'Projections already found for {scape_path.name}, but not the median '
+                  f'projection. Computing it...')
+            scape_utils.get_median_projection(scape_path, batch_size=batch_size)
+        else:
+            print(f'Projections already found for {scape_path.name}.')
         return
     print(f'Projections {"found, overwriting" if exists else "not found"} '
-          f'for {scape_path.name}. Computing them...')
+          f'for {scape_path.name}. Computing them'
+          f'{" (with the median)" if median else ""}...')
     activity_path = (_get_activity_path(exp_folder, scape_path, time_0)
                      if time_0 is not None else None)
     scape_utils.get_projection_images(scape_path, batch_size=batch_size,
-                                      activity_path=activity_path)
+                                      activity_path=activity_path, median=median)
 
 
 def _combine_samples(exp_folder: Path,
@@ -507,7 +539,8 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
     by sample# then run#, each with an index, and asks which indices to keep
     (supports ranges, e.g. `'2-5,7,9-12'`). Then, sample by sample, for each
     remaining run checks (and if needed fixes/computes) the folder structure
-    and projection images via `scape_utils`, and once all of a sample's runs
+    and projection images via `scape_utils` (plus the median projection for
+    runs with fewer than `MEDIAN_MAX_VOLUMES` volumes), and once all of a sample's runs
     are done, combines their projections into a new `sample#_combined` folder
     before moving on to the next sample. Samples with a single (kept) run get
     no `sample#_combined` folder.
