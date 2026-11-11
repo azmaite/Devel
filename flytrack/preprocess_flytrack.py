@@ -49,6 +49,20 @@ folder to the recording folder plus the hours after puparium formation, e.g.
 end of the main folder name (``..._MM-DD_HHhMM``) and the recording time from
 the recording folder or .mkv name; if either is missing the hAPF is omitted.
 
+At the end of a single long recording, every processed recording's activity
+(re-plotted from the saved ``act``, no video decoding) is also summarized in a
+3-column grid in time order, each subplot titled with its hAPF, as two figures
+in ``00_activity``:
+
+    - ``00_summary_shared.png``: all subplots share the x and y limits and touch
+      horizontally, so each row reads as one continuous trace split by vertical
+      lines (y ticks on the first column only)
+    - ``00_summary_own.png``: each subplot keeps its own y limits, y scale hidden
+
+To redo only these, e.g. for a folder processed before they existed:
+``from preprocess_flytrack import save_activity_summary;
+save_activity_summary('path/to/main')``.
+
 Single long recording only (in the analysis folder)
 ---------------------------------------------------
 An analysis folder ``YYYY-MM-DD_analysis`` is created in the main folder (or
@@ -129,6 +143,8 @@ from flytrack_core import (MAIN_PATH, MKV_PATHS_NAME, PROJ_H5_NAME,
 import flytrack_io
 
 ACT_FOLDER = '00_activity'               # in the main folder (long recording)
+ACT_SUMMARY_NAME = '00_summary_{}.png'   # in ACT_FOLDER; {} is 'shared' or 'own'
+ACT_SUMMARY_COLS = 3
 ANALYSIS_SUFFIX = '_analysis'            # analysis folder: YYYY-MM-DD_analysis
 GRID_SAVE_NAME = 'max_projection_grid.png'  # in the analysis folder
 GRID_MAX_ROWS = 4
@@ -417,6 +433,9 @@ def _process_long(main: str,
         print(f'{i+1}/{len(todo)}: ', end='')
         _process_one(mkv, _get_activity_path(main, mkv, time_0), motion_correct)
 
+    # activity summary of every processed recording (not only `todo`)
+    save_activity_summary(main, mkv_paths)
+
     analysis_folder = _get_analysis_folder(main)
     json_path = os.path.join(analysis_folder, MKV_PATHS_NAME)
 
@@ -608,6 +627,92 @@ def _get_activity_path(main: str,
     if hours is not None:
         rec_name += f'_{hours}hAPF'
     return os.path.join(main, ACT_FOLDER, rec_name + '.png')
+
+
+def save_activity_summary(main: str,
+                          mkv_paths: list[str] | None = None) -> None:
+    """
+    Save grids of a long recording's activity traces in `ACT_FOLDER`.
+
+    Every processed recording's `act` is re-plotted (time axis from its
+    timestamps) in a grid of `ACT_SUMMARY_COLS` columns, in time order, each
+    subplot titled with its hours APF. Two figures are saved (see
+    `ACT_SUMMARY_NAME`): 'shared', where every subplot has the same x and y
+    limits and the subplots in a row touch so the row reads as one continuous
+    trace, and 'own', where each subplot keeps its own y limits and the y scale
+    is hidden.
+
+    Parameters
+    ----------
+    main : str
+        The main folder of the long recording.
+    mkv_paths : list of str, optional
+        The .mkv files of the long recording. If None, they are found with
+        `_find_recordings()`. Unprocessed ones are left out.
+    """
+
+    if mkv_paths is None:
+        mkv_paths = [mkv for group in _find_recordings(main) if group['long']
+                     for mkv in group['mkvs']]
+    time_0 = _get_time_0(main)
+
+    # load every processed recording's trace
+    traces = []
+    for mkv in sorted(mkv_paths, key=lambda p: os.path.dirname(p)):
+        dir = os.path.dirname(mkv)
+        if not _outputs_exist(dir):
+            continue
+        with h5py.File(os.path.join(dir, PROJ_H5_NAME), 'r') as f:
+            act = f['act'][:]  # type: ignore[index]
+        timestamps, _ = flytrack_io.load_timestamps(mkv)
+        n = min(len(timestamps), len(act))
+        hours = _get_hours_apf(mkv, time_0)
+        traces.append({'title': os.path.basename(dir) if hours is None else f'{hours} hAPF',
+                       'time': timestamps[:n] / 60, 'act': act[:n]})
+    if len(traces) == 0:
+        return
+    print(f'Saving activity summary of {len(traces)} recordings...')
+
+    n_rows = int(np.ceil(len(traces) / ACT_SUMMARY_COLS))
+    t_max = max(tr['time'][-1] for tr in traces)
+    y_min = min(tr['act'].min() for tr in traces)
+    y_max = max(tr['act'].max() for tr in traces)
+    y_pad = 0.03 * (y_max - y_min)
+
+    for scale in ('shared', 'own'):
+        fig, axes = plt.subplots(n_rows, ACT_SUMMARY_COLS,
+                                 figsize=(18, 1.6 * n_rows), squeeze=False)
+        for i, ax in enumerate(axes.flat):
+            if i >= len(traces):
+                ax.axis('off')
+                continue
+            tr = traces[i]
+            ax.plot(tr['time'], tr['act'], linewidth=0.3)
+            ax.set_title(tr['title'], fontsize=9, pad=2)
+            if scale == 'shared':
+                ax.set_xlim(0, t_max)
+                ax.set_ylim(y_min - y_pad, y_max + y_pad)
+                if i % ACT_SUMMARY_COLS != 0:  # y ticks on the first column only
+                    ax.tick_params(left=False, labelleft=False)
+            else:
+                ax.set_xlim(0, tr['time'][-1])
+                ax.tick_params(left=False, labelleft=False)
+            if i + ACT_SUMMARY_COLS < len(traces):  # x labels on the last plot of each column
+                ax.tick_params(labelbottom=False)
+            else:
+                ax.set_xlabel('Time (min)', fontsize=8)
+            ax.tick_params(labelsize=7)
+
+        if scale == 'shared':
+            axes[n_rows // 2, 0].set_ylabel('Mean fluorescence')
+        fig.suptitle(os.path.basename(os.path.normpath(main)), y=1.0)
+        fig.tight_layout()
+        if scale == 'shared':  # subplots in a row touch: one continuous trace
+            fig.subplots_adjust(wspace=0)
+        save_path = os.path.join(main, ACT_FOLDER, ACT_SUMMARY_NAME.format(scale))
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
 
 
 def _align_group(entries: list[dict],
