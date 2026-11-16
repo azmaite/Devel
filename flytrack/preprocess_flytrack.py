@@ -10,16 +10,17 @@ The structure inside the selected folder decides how recordings are handled:
   selected folder (one subfolder per recording, named ``YYYYMMDD_HHMMSS``), e.g.
   ``<exp>_MM-DD_HHhMM/20260730_141937/*.mkv``. The selected folder is the main
   folder. Its recordings are all from one fly, so they are also aligned to each
-  other and summarized together (see below).
+  other and summarized together in ``00_preanalysis`` (see below).
 - **Multiple recordings**: .mkv files sit two levels down, inside first-level
   subfolders named ``FlyNNN``, e.g. ``<exp>/Fly_001/001/*.mkv``. Every
   first-level subfolder is then its own main folder, and each of its recordings
-  is processed independently (no analysis folder, alignment, or grid).
+  is processed independently (no ``00_preanalysis``, alignment, or grids).
 
 A .mkv directly inside the selected folder (e.g. a single recording folder was
 selected) is also processed independently. .mkv files deeper than two levels
-are ignored with a warning. Selecting an existing analysis folder (one holding a
-``mkv_paths.json``) is the same as selecting its parent. Each of the
+are ignored with a warning. Selecting a ``00_preanalysis`` folder (or an older
+``YYYY-MM-DD_analysis`` one, holding a ``mkv_paths.json``) is the same as
+selecting its parent. Each of the
 first-level subfolders is classified on its own, so a folder mixing both
 layouts is handled too.
 
@@ -42,46 +43,40 @@ the acquisition frame rate from ``config_concatenated.yaml``, with one fixed
 contrast (0.2th-99.8th percentiles of frames sampled across the video).
 
 The activity plot (mean fluorescence over time) is saved as ``activity.png``
-next to the .mkv for independent recordings. For a single long recording it is
-saved in ``<main>/00_activity/`` instead, named after the path from the main
-folder to the recording folder plus the hours after puparium formation, e.g.
-``20260730_141937_72hAPF.png``. The puparium-formation time is read from the
-main folder name (``..._MM-DD_HHhMM``, optionally followed by a suffix such as
-``_FAIL``) and the recording time from the recording folder or .mkv name; if
-either is missing the hAPF is omitted.
+next to the .mkv for independent recordings, but not for a single long
+recording, which is summarized as a whole instead (see below).
 
-At the end of a single long recording, every processed recording's activity
-(re-plotted from the saved ``act``, no video decoding) is also summarized in a
-3-column grid in time order, each subplot titled with its hAPF, as two figures
-in ``00_activity``:
+Single long recording only (in ``<main>/00_preanalysis``)
+---------------------------------------------------------
+After processing, ``<main>/00_preanalysis/`` (see `common.preanalysis`) gets:
 
-    - ``00_summary_shared.png``: all subplots share the x and y limits and touch
-      horizontally, so each row reads as one continuous trace split by vertical
-      lines (y ticks on the first column only)
-    - ``00_summary_own.png``: each subplot keeps its own y limits, y scale hidden
-
-To redo only these, e.g. for a folder processed before they existed:
-``from preprocess_flytrack import save_activity_summary;
-save_activity_summary('path/to/main')``.
-
-Single long recording only (in the analysis folder)
----------------------------------------------------
-An analysis folder ``YYYY-MM-DD_analysis`` is created in the main folder (or
-the existing one, holding a ``mkv_paths.json``, is reused). Then:
-
-1. ``mkv_paths.json`` lists every recording with its ``size``, ``num_frames``,
-   ``fps``, and ``group_shift``.
-2. The recordings are aligned to each other in case the sample moved between
-   them: an integer-pixel shift (high-pass phase correlation of the medians,
-   relative to the first recording) is stored as ``group_shift`` ([dy, dx]).
-3. ``projection_images_grouped.h5`` holds, after applying those shifts, the
+1. ``activity_shared.png`` / ``activity_own.png``: every processed recording's
+   activity (re-read from the saved ``act``, no video decoding) in 3-column
+   grids in time order, each subplot titled with its hours after puparium
+   formation (hAPF). In 'shared' all subplots share the x and y limits and
+   touch horizontally, so each row reads as one continuous trace; in 'own'
+   each keeps its own y limits.
+2. ``mkv_paths.json``: every recording with its ``size``, ``num_frames``,
+   ``fps``, and ``group_shift``. The recordings are aligned to each other in
+   case the sample moved between them: an integer-pixel shift (high-pass phase
+   correlation of the medians, relative to the first recording) is stored as
+   ``group_shift`` ([dy, dx]). Used by ``get_segmentation_data.py``.
+3. ``projection_images_grouped.h5``: after applying those shifts, the
    pixel-wise median of the medians (``median``), the overall max projection
-   (``max_proj``), and the combined ``std``, with their preview PNGs.
-4. ``max_projection_grid.png`` shows every recording's max projection labelled
-   with its time and hAPF, at most 4 rows x 12 columns per figure (several
-   figures, ``max_projection_grid_1.png``, ..., if needed). All share one
-   contrast: vmin is the 10th percentile of the per-image 0.2th percentiles,
-   vmax the 90th percentile of the per-image 99.8th percentiles.
+   (``max_proj``), and the combined ``std`` (used for the segmentation, see
+   ``get_segmentation_data.py`` and ``select_manual_roi.py``).
+4. ``max_projection_grid.png`` and ``median_grid.png``: every recording's max
+   projection / median, labelled with its time and hAPF, at most 4 rows x 12
+   columns per figure (several figures, ``..._grid_1.png``, ..., if needed),
+   all with one shared contrast (see `common.preanalysis.save_image_grid()`).
+
+The puparium-formation time is read from the main folder name
+(``..._MM-DD_HHhMM``, optionally followed by a suffix such as ``_FAIL``) and the
+recording time from the recording folder or .mkv name; if either is missing the
+hAPF is omitted. To redo only the activity grids, e.g. for a folder processed
+before they existed: ``from preprocess_flytrack import save_activity_summary;
+save_activity_summary('path/to/main')``. The frequency analysis of the activity
+is in ``analysis/flytrack/``.
 
 Options
 -------
@@ -95,11 +90,11 @@ again with rigid-translation drift correction (see
 `flytrack_core._process_mkv()`). Their ``projection_images.h5`` then holds the
 corrected images under the usual names, the uncorrected ones with a ``_raw``
 suffix (``median_raw``, ``max_proj_raw``, ...), and the per-frame drift as
-``shifts`` (plotted in ``drift.png``); the PNGs and activity plot are redone
-from the corrected frames, and the corrected ``summary_video.mp4`` is written (the
+``shifts`` (plotted in ``drift.png``); the PNGs (and activity plot, for
+independent recordings) are redone from the corrected frames, and the corrected ``summary_video.mp4`` is written (the
 uncorrected one from the first run is renamed ``summary_video_raw.mp4``).
-For a single long recording, the analysis-folder outputs are then rebuilt from
-the recordings in the existing ``mkv_paths.json`` (or every processed one).
+For a single long recording, the ``00_preanalysis`` outputs are then rebuilt
+from the recordings in the existing ``mkv_paths.json`` (or every processed one).
 
 Example usages from the terminal:
         python3 preprocess_flytrack.py
@@ -107,7 +102,7 @@ Example usages from the terminal:
         python3 preprocess_flytrack.py --folder path/to/folder -m
 From python:
         from preprocess_flytrack import preprocess_flytrack
-        analysis_folder = preprocess_flytrack('path/to/folder')
+        preanalysis_folder = preprocess_flytrack('path/to/folder')
         preprocess_flytrack('path/to/folder', motion_correct=True)
 """
 
@@ -127,7 +122,6 @@ from skimage.registration import phase_cross_correlation
 
 import matplotlib
 matplotlib.use('Agg')  # force a non-interactive backend
-import matplotlib.pyplot as plt
 
 # put this file's folder on sys.path so `import flytrack_core` works no matter
 # how this module is launched (as a script, via `-m`, or imported from a
@@ -137,22 +131,16 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from flytrack_core import (MAIN_PATH, MKV_PATHS_NAME, PROJ_H5_NAME,
-                           GROUPED_H5_NAME, ACT_SAVE_NAME, CONTRAST_PCT,
-                           _highpass, _process_mkv, _outputs_exist,
+                           GROUPED_H5_NAME, ACT_SAVE_NAME, _highpass, _process_mkv, _outputs_exist,
                            _is_corrected, _read_existing_metadata,
-                           _parse_selection, _plot_activity, _write_pngs)
+                           _parse_selection, _plot_activity)
 import flytrack_io
+from common import preanalysis
+from common.dialogs import ask_directory
+from common.preanalysis import PREANALYSIS_FOLDER, get_hours_apf, get_time_0
 
-ACT_FOLDER = '00_activity'               # in the main folder (long recording)
-ACT_SUMMARY_NAME = '00_summary_{}.png'   # in ACT_FOLDER; {} is 'shared' or 'own'
-ACT_SUMMARY_COLS = 3
-ANALYSIS_SUFFIX = '_analysis'            # analysis folder: YYYY-MM-DD_analysis
-GRID_SAVE_NAME = 'max_projection_grid.png'  # in the analysis folder
-GRID_MAX_ROWS = 4
-GRID_MAX_COLS = 12
-# grid contrast: vmin/vmax are these percentiles (across images) of the
-# per-image CONTRAST_PCT low/high percentiles
-GRID_CONTRAST_PCT = (10, 90)
+# image grids in 00_preanalysis: dataset in projection_images.h5 -> file name
+GRID_NAMES = {'max_proj': 'max_projection_grid.png', 'median': 'median_grid.png'}
 
 
 def preprocess_flytrack(folder: str = '',
@@ -175,28 +163,22 @@ def preprocess_flytrack(folder: str = '',
     Returns
     -------
     str or None
-        The analysis folder of the (last) single long recording processed, or
-        None if there was none.
+        The ``00_preanalysis`` folder of the (last) single long recording
+        processed, or None if there was none.
     """
 
     # ask for the folder if not provided
     if not folder:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        flytrack_io.sort_dialog_descending(root)  # newest (YYYYMMDD_...) folders first
-        folder = filedialog.askdirectory(initialdir=MAIN_PATH,
-                                         title='Select folder to preprocess')
+        folder = ask_directory(MAIN_PATH, 'Select folder to preprocess')
 
     assert os.path.exists(folder), f'Folder {folder} does not exist'
     assert os.path.isdir(folder), f'Folder {folder} must be a directory'
     folder = os.path.abspath(folder)
 
-    # an analysis folder stands for the main folder it sits in
+    # a 00_preanalysis (or older analysis) folder stands for the main folder it sits in
     if os.path.exists(os.path.join(folder, MKV_PATHS_NAME)):
         folder = os.path.dirname(folder)
-        print(f'Analysis folder selected, using its parent: {folder}')
+        print(f'Pre-analysis folder selected, using its parent: {folder}')
 
     # find the recordings and group them by main folder
     groups = _find_recordings(folder)
@@ -218,21 +200,21 @@ def preprocess_flytrack(folder: str = '',
     else:
         chosen = set(all_mkvs)
 
-    analysis_folder = None
+    preanalysis_folder = None
     for group in groups:
         todo = [mkv for mkv in group['mkvs'] if mkv in chosen]
         if group['long']:
             if len(todo) == 0:
                 continue
-            analysis_folder = _process_long(group['main'], group['mkvs'], todo,
-                                            motion_correct)
+            preanalysis_folder = _process_long(group['main'], group['mkvs'], todo,
+                                               motion_correct)
         else:
             for i, mkv in enumerate(todo):
                 print(f'{i+1}/{len(todo)}: ', end='')
                 _process_one(mkv, os.path.join(os.path.dirname(mkv), ACT_SAVE_NAME),
                              motion_correct)
 
-    return analysis_folder
+    return preanalysis_folder
 
 
 def _is_ignored(path: Path) -> bool:
@@ -247,8 +229,8 @@ def _is_ignored(path: Path) -> bool:
     Returns
     -------
     bool
-        True for hidden folders, ``00_*`` folders (e.g. ``00_activity``), and
-        analysis folders (holding a ``mkv_paths.json``).
+        True for hidden folders, ``00_*`` folders (e.g. ``00_preanalysis``), and
+        older analysis folders (holding a ``mkv_paths.json``).
     """
 
     return (path.name.startswith('.') or path.name.startswith('00_')
@@ -360,7 +342,7 @@ def _pick_recordings(mkv_paths: list[str],
 
 
 def _process_one(mkv_file: str,
-                 act_path: str,
+                 act_path: str | None,
                  motion_correct: bool) -> None:
     """
     Process one recording, unless it's already processed (and not correcting).
@@ -372,8 +354,9 @@ def _process_one(mkv_file: str,
     ----------
     mkv_file : str
         Path to the .mkv video file.
-    act_path : str
-        Save path of its activity plot.
+    act_path : str or None
+        Save path of its activity plot, or None for no plot (recordings of a
+        long recording, summarized in a grid instead).
     motion_correct : bool
         Whether to (re-)process it with motion correction.
     """
@@ -383,7 +366,7 @@ def _process_one(mkv_file: str,
 
     if not motion_correct and _outputs_exist(dir):
         print(f'{name} already processed, skip.')
-        if not os.path.exists(act_path):
+        if act_path is not None and not os.path.exists(act_path):
             with h5py.File(os.path.join(dir, PROJ_H5_NAME), 'r') as f:
                 act = f['act'][:]  # type: ignore[index]
             _plot_activity(mkv_file, act, act_path)
@@ -391,7 +374,8 @@ def _process_one(mkv_file: str,
 
     verb = 'motion-correcting' if motion_correct else 'processing'
     print(f'{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - {verb} {name}')
-    _process_mkv(mkv_file, act_path=act_path, motion_correct=motion_correct)
+    _process_mkv(mkv_file, act_path=act_path, motion_correct=motion_correct,
+                 plot_activity=act_path is not None)
 
 
 def _process_long(main: str,
@@ -401,12 +385,14 @@ def _process_long(main: str,
     """
     Process the recordings of a single long recording and its group outputs.
 
-    Processes the recordings in `todo` (activity plots in ``00_activity``),
-    then writes ``mkv_paths.json``, aligns the recordings, and builds the
-    grouped projections and the max-projection grid in the analysis folder.
-    Normally the group is the recordings in `todo`; when motion-correcting it is
-    the recordings already in ``mkv_paths.json`` (or every processed one, if
-    there is none), so the group outputs are rebuilt from the corrected images.
+    Processes the recordings in `todo` (without activity plots), then, in
+    ``<main>/00_preanalysis``, saves the activity grids of every processed
+    recording (see `save_activity_summary()`), writes ``mkv_paths.json``,
+    aligns the recordings, and builds the grouped projections and the max
+    projection and median grids. Normally the group is the recordings in
+    `todo`; when motion-correcting it is the recordings already in
+    ``mkv_paths.json`` (or every processed one, if there is none), so the group
+    outputs are rebuilt from the corrected images.
 
     Parameters
     ----------
@@ -422,23 +408,24 @@ def _process_long(main: str,
     Returns
     -------
     str
-        The analysis folder.
+        The ``00_preanalysis`` folder.
     """
 
-    time_0 = _get_time_0(main)
+    time_0 = get_time_0(main)
     if time_0 is None:
         print(f'Could not get the puparium formation time from the name of '
               f'{main} (expected to end in MM-DD_HHhMM); hAPF will be omitted.')
 
     for i, mkv in enumerate(todo):
         print(f'{i+1}/{len(todo)}: ', end='')
-        _process_one(mkv, _get_activity_path(main, mkv, time_0), motion_correct)
+        _process_one(mkv, None, motion_correct)
 
-    # activity summary of every processed recording (not only `todo`)
+    # activity grids of every processed recording (not only `todo`)
     save_activity_summary(main, mkv_paths)
 
-    analysis_folder = _get_analysis_folder(main)
-    json_path = os.path.join(analysis_folder, MKV_PATHS_NAME)
+    folder = os.path.join(main, PREANALYSIS_FOLDER)
+    os.makedirs(folder, exist_ok=True)
+    json_path = os.path.join(folder, MKV_PATHS_NAME)
 
     # recordings that make up the group
     if not motion_correct:
@@ -454,7 +441,7 @@ def _process_long(main: str,
               f'the group outputs.')
     group = [mkv for mkv in group if mkv not in missing]
     if len(group) == 0:
-        return analysis_folder
+        return folder
 
     # write mkv_paths.json with each recording's metadata
     entries = []
@@ -466,70 +453,11 @@ def _process_long(main: str,
         json.dump(entries, f, indent=2)
 
     # align the recordings to each other, then build the group outputs
-    _align_group(entries, analysis_folder)
-    _build_grouped(entries, analysis_folder)
-    _save_grid_image(entries, analysis_folder, main, time_0)
+    _align_group(entries, folder)
+    _build_grouped(entries, folder)
+    _save_grids(entries, folder, main, time_0)
 
-    return analysis_folder
-
-
-def _get_analysis_folder(main: str) -> str:
-    """
-    Get the analysis folder of a main folder, creating it if there is none.
-
-    An existing analysis folder (a subfolder holding a ``mkv_paths.json``) is
-    reused (the last by name, if several); otherwise ``YYYY-MM-DD_analysis``
-    with today's date is created.
-
-    Parameters
-    ----------
-    main : str
-        The main folder.
-
-    Returns
-    -------
-    str
-        Path to the analysis folder.
-    """
-
-    existing = sorted(p for p in Path(main).iterdir()
-                      if p.is_dir() and (p / MKV_PATHS_NAME).exists())
-    if existing:
-        analysis_folder = str(existing[-1])
-        print(f'Using existing analysis folder: {analysis_folder}')
-    else:
-        analysis_name = datetime.date.today().strftime('%Y-%m-%d') + ANALYSIS_SUFFIX
-        analysis_folder = os.path.join(main, analysis_name)
-        os.makedirs(analysis_folder, exist_ok=True)
-        print(f'Created analysis folder: {analysis_folder}')
-    return analysis_folder
-
-
-def _get_time_0(main: str) -> datetime.datetime | None:
-    """
-    Extract the puparium formation time from the name of the main folder.
-
-    Uses the last ``MM-DD_HHhMM`` in the folder name, so a suffix after it
-    (e.g. ``_FAIL``) is allowed. The year is not encoded, so it is left as 1900
-    and set per recording in `_get_hours_apf()`.
-
-    Parameters
-    ----------
-    main : str
-        Main folder whose name ends with the puparium formation time.
-
-    Returns
-    -------
-    datetime.datetime or None
-        Puparium formation time, or None if the folder name does not match.
-    """
-
-    matches = re.findall(r'(?<!\d)\d{2}-\d{2}_\d{2}h\d{2}(?!\d)',
-                         os.path.basename(main.rstrip('/')))
-    try:
-        return datetime.datetime.strptime(matches[-1], '%m-%d_%Hh%M')
-    except (IndexError, ValueError):
-        return None
+    return folder
 
 
 def _get_recording_time(mkv_file: str) -> datetime.datetime | None:
@@ -566,83 +494,13 @@ def _get_recording_time(mkv_file: str) -> datetime.datetime | None:
         return None
 
 
-def _get_hours_apf(mkv_file: str,
-                   time_0: datetime.datetime | None) -> int | None:
+def load_activity_traces(main: str,
+                         mkv_paths: list[str] | None = None) -> list[dict]:
     """
-    Calculate the hours after puparium formation (APF) of a recording.
+    Load the activity traces of every processed recording of a long recording.
 
-    `time_0` carries no year, so it is given the recording's year (or the year
-    before, if that would put it after the recording, e.g. across New Year).
-
-    Parameters
-    ----------
-    mkv_file : str
-        Path to the .mkv video file (see `_get_recording_time()`).
-    time_0 : datetime.datetime or None
-        Puparium formation time, see `_get_time_0()`.
-
-    Returns
-    -------
-    int or None
-        Hours APF, rounded to the nearest hour, or None if either time is
-        unknown.
-    """
-
-    time_t = _get_recording_time(mkv_file)
-    if time_0 is None or time_t is None:
-        return None
-    t0 = time_0.replace(year=time_t.year)
-    if t0 > time_t:
-        t0 = t0.replace(year=time_t.year - 1)
-    return int(np.round((time_t - t0).total_seconds() / 3600))
-
-
-def _get_activity_path(main: str,
-                       mkv_file: str,
-                       time_0: datetime.datetime | None) -> str:
-    """
-    Get the save path of the activity plot of a long-recording recording.
-
-    Plots are saved in ``<main>/00_activity/``, named as the path from `main`
-    to the recording folder with the subfolder names joined by ``_``, plus the
-    hours APF if known (e.g. ``20260730_141937_72hAPF.png``).
-
-    Parameters
-    ----------
-    main : str
-        The main folder.
-    mkv_file : str
-        Path to the .mkv video file.
-    time_0 : datetime.datetime or None
-        Puparium formation time, see `_get_time_0()`.
-
-    Returns
-    -------
-    str
-        Path to the activity plot png.
-    """
-
-    rec_dir = Path(mkv_file).parent.resolve()
-    rel_parts = rec_dir.relative_to(Path(main).resolve()).parts
-    rec_name = '_'.join(rel_parts) if rel_parts else rec_dir.name
-    hours = _get_hours_apf(mkv_file, time_0)
-    if hours is not None:
-        rec_name += f'_{hours}hAPF'
-    return os.path.join(main, ACT_FOLDER, rec_name + '.png')
-
-
-def save_activity_summary(main: str,
-                          mkv_paths: list[str] | None = None) -> None:
-    """
-    Save grids of a long recording's activity traces in `ACT_FOLDER`.
-
-    Every processed recording's `act` is re-plotted (time axis from its
-    timestamps) in a grid of `ACT_SUMMARY_COLS` columns, in time order, each
-    subplot titled with its hours APF. Two figures are saved (see
-    `ACT_SUMMARY_NAME`): 'shared', where every subplot has the same x and y
-    limits and the subplots in a row touch so the row reads as one continuous
-    trace, and 'own', where each subplot keeps its own y limits and the y scale
-    is hidden.
+    Reads each recording's saved `act` (no video decoding), in time order,
+    labelled with its hours APF (see `common.preanalysis`).
 
     Parameters
     ----------
@@ -651,14 +509,21 @@ def save_activity_summary(main: str,
     mkv_paths : list of str, optional
         The .mkv files of the long recording. If None, they are found with
         `_find_recordings()`. Unprocessed ones are left out.
+
+    Returns
+    -------
+    list of dict
+        One trace per recording, with keys 'name' (recording folder, relative
+        to `main`), 'title' (hours APF, or the recording folder name if
+        unknown), 'hours' (int or None), 'activity' and 'fs' (see
+        `common.preanalysis`).
     """
 
     if mkv_paths is None:
         mkv_paths = [mkv for group in _find_recordings(main) if group['long']
                      for mkv in group['mkvs']]
-    time_0 = _get_time_0(main)
+    time_0 = get_time_0(main)
 
-    # load every processed recording's trace
     traces = []
     for mkv in sorted(mkv_paths, key=lambda p: os.path.dirname(p)):
         dir = os.path.dirname(mkv)
@@ -666,59 +531,43 @@ def save_activity_summary(main: str,
             continue
         with h5py.File(os.path.join(dir, PROJ_H5_NAME), 'r') as f:
             act = f['act'][:]  # type: ignore[index]
-        timestamps, _ = flytrack_io.load_timestamps(mkv)
-        n = min(len(timestamps), len(act))
-        hours = _get_hours_apf(mkv, time_0)
-        traces.append({'title': os.path.basename(dir) if hours is None else f'{hours} hAPF',
-                       'time': timestamps[:n] / 60, 'act': act[:n]})
-    if len(traces) == 0:
-        return
-    print(f'Saving activity summary of {len(traces)} recordings...')
+        timestamps, fps = flytrack_io.load_timestamps(mkv)
+        hours = get_hours_apf(time_0, _get_recording_time(mkv))
+        traces.append({'name': os.path.relpath(dir, main),
+                       'title': os.path.basename(dir) if hours is None else f'{hours} hAPF',
+                       'hours': hours, 'activity': act[:len(timestamps)], 'fs': fps})
+    return traces
 
-    n_rows = int(np.ceil(len(traces) / ACT_SUMMARY_COLS))
-    t_max = max(tr['time'][-1] for tr in traces)
-    y_min = min(tr['act'].min() for tr in traces)
-    y_max = max(tr['act'].max() for tr in traces)
-    y_pad = 0.03 * (y_max - y_min)
 
-    for scale in ('shared', 'own'):
-        fig, axes = plt.subplots(n_rows, ACT_SUMMARY_COLS,
-                                 figsize=(18, 1.6 * n_rows), squeeze=False)
-        for i, ax in enumerate(axes.flat):
-            if i >= len(traces):
-                ax.axis('off')
-                continue
-            tr = traces[i]
-            ax.plot(tr['time'], tr['act'], linewidth=0.3)
-            ax.set_title(tr['title'], fontsize=9, pad=2)
-            if scale == 'shared':
-                ax.set_xlim(0, t_max)
-                ax.set_ylim(y_min - y_pad, y_max + y_pad)
-                if i % ACT_SUMMARY_COLS != 0:  # y ticks on the first column only
-                    ax.tick_params(left=False, labelleft=False)
-            else:
-                ax.set_xlim(0, tr['time'][-1])
-                ax.tick_params(left=False, labelleft=False)
-            if i + ACT_SUMMARY_COLS < len(traces):  # x labels on the last plot of each column
-                ax.tick_params(labelbottom=False)
-            else:
-                ax.set_xlabel('Time (min)', fontsize=8)
-            ax.tick_params(labelsize=7)
+def save_activity_summary(main: str,
+                          mkv_paths: list[str] | None = None) -> None:
+    """
+    Save the activity grids of a long recording in ``<main>/00_preanalysis``.
 
-        if scale == 'shared':
-            axes[n_rows // 2, 0].set_ylabel('Mean fluorescence')
-        fig.suptitle(os.path.basename(os.path.normpath(main)), y=1.0)
-        fig.tight_layout()
-        if scale == 'shared':  # subplots in a row touch: one continuous trace
-            fig.subplots_adjust(wspace=0)
-        save_path = os.path.join(main, ACT_FOLDER, ACT_SUMMARY_NAME.format(scale))
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        fig.savefig(save_path, dpi=200, bbox_inches='tight')
-        plt.close(fig)
+    The traces of every processed recording (see `load_activity_traces()`) are
+    plotted with `common.preanalysis.save_activity_summary()`.
+
+    Parameters
+    ----------
+    main : str
+        The main folder of the long recording.
+    mkv_paths : list of str, optional
+        The .mkv files of the long recording. If None, they are found with
+        `_find_recordings()`. Unprocessed ones are left out.
+
+    Returns
+    -------
+    None
+    """
+
+    preanalysis.save_activity_summary(load_activity_traces(main, mkv_paths),
+                                      os.path.join(main, PREANALYSIS_FOLDER),
+                                      os.path.basename(os.path.normpath(main)),
+                                      ylabel='Mean fluorescence', linewidth=0.3)
 
 
 def _align_group(entries: list[dict],
-                 analysis_folder: str) -> None:
+                 folder: str) -> None:
     """
     Estimate a per-recording shift that aligns each median to the first's.
 
@@ -733,8 +582,8 @@ def _align_group(entries: list[dict],
     ----------
     entries : list of dict
         The mkv_paths.json entries, each with an 'mkv_path' key.
-    analysis_folder : str
-        Folder holding `mkv_paths.json`.
+    folder : str
+        Folder holding `mkv_paths.json` (``00_preanalysis``).
     """
 
     # high-pass of the first recording's median is the alignment reference
@@ -755,7 +604,7 @@ def _align_group(entries: list[dict],
             ref_hp, _highpass(median), upsample_factor=1, normalization=None)
         entry['group_shift'] = [int(round(shift[0])), int(round(shift[1]))]
 
-    with open(os.path.join(analysis_folder, MKV_PATHS_NAME), 'w') as f:
+    with open(os.path.join(folder, MKV_PATHS_NAME), 'w') as f:
         json.dump(entries, f, indent=2)
 
 
@@ -785,7 +634,7 @@ def _shift_int(img: np.ndarray, shift: list[int]) -> np.ndarray:
 
 
 def _build_grouped(entries: list[dict],
-                   analysis_folder: str) -> None:
+                   folder: str) -> None:
     """
     Combine per-recording projections into grouped outputs.
 
@@ -794,15 +643,15 @@ def _build_grouped(entries: list[dict],
     computes the pixel-wise median of all median images (`median`), the
     pixel-wise maximum of all max projections (`max_proj`), and the std image
     rebuilt from the combined cumulative mean, mean of squares, and frame counts.
-    These are written to `projection_images_grouped.h5` and its preview PNGs are
-    saved with `_write_pngs()`.
+    These are written to `projection_images_grouped.h5` (no preview PNGs: it is
+    used by `get_segmentation_data.py` and `select_manual_roi.py`, not viewed).
 
     Parameters
     ----------
     entries : list of dict
         The mkv_paths.json entries, each with an 'mkv_path' and 'group_shift'.
-    analysis_folder : str
-        Folder the grouped outputs are written to.
+    folder : str
+        Folder the grouped outputs are written to (``00_preanalysis``).
     """
 
     medians: list[np.ndarray] = []
@@ -844,98 +693,62 @@ def _build_grouped(entries: list[dict],
     std = np.sqrt(np.clip(grand_mean_sq - grand_mean ** 2, 0, None))
 
     # save grouped projection images
-    grouped_path = os.path.join(analysis_folder, GROUPED_H5_NAME)
+    grouped_path = os.path.join(folder, GROUPED_H5_NAME)
     with h5py.File(grouped_path, 'w') as f:
         f.create_dataset('median', data=median)
         f.create_dataset('max_proj', data=max_proj)
         f.create_dataset('std', data=std)
     print(f'Saved grouped projections to {grouped_path}')
 
-    # save the grouped median / max projection / std preview PNGs
-    _write_pngs(grouped_path)
 
-
-def _save_grid_image(entries: list[dict],
-                     analysis_folder: str,
-                     main: str,
-                     time_0: datetime.datetime | None) -> None:
+def _save_grids(entries: list[dict],
+                folder: str,
+                main: str,
+                time_0: datetime.datetime | None) -> None:
     """
-    Save grids of the recordings' max projections labelled with hours APF.
+    Save grids of the recordings' max projections and medians (see
+    `GRID_NAMES`), labelled with their time and hours APF.
 
-    Each figure holds at most `GRID_MAX_ROWS` rows x `GRID_MAX_COLS` columns;
-    if there are more recordings, several figures are saved
-    (``max_projection_grid_1.png``, ...). Horizontal images are rotated 90
-    degrees clockwise. All images share one contrast: from each image's
-    `CONTRAST_PCT` low and high percentiles, vmin is the `GRID_CONTRAST_PCT[0]`
-    percentile of the lows and vmax the `GRID_CONTRAST_PCT[1]` percentile of the
-    highs. Each subplot is titled with the recording time and hAPF if known, or
-    else the recording folder name.
+    Horizontal images are rotated 90 degrees clockwise. Each subplot is titled
+    with the recording time and hAPF if known, or else the recording folder
+    name. See `common.preanalysis.save_image_grid()` for the layout and the
+    shared contrast.
 
     Parameters
     ----------
     entries : list of dict
         The mkv_paths.json entries, one per subplot.
-    analysis_folder : str
-        Folder the figures are saved to.
+    folder : str
+        Folder the figures are saved to (``00_preanalysis``).
     main : str
         The main folder (recording folder names are relative to it).
     time_0 : datetime.datetime or None
-        Puparium formation time, see `_get_time_0()`.
+        Puparium formation time, see `common.preanalysis.get_time_0()`.
+
+    Returns
+    -------
+    None
     """
 
-    print(f'Generating max projection grid for {len(entries)} recordings...')
-
-    # load all the max projections (corrected ones, if motion-corrected)
-    max_projs = []
+    titles = []
     for entry in entries:
-        h5_path = os.path.join(os.path.dirname(entry['mkv_path']), PROJ_H5_NAME)
-        with h5py.File(h5_path, 'r') as f:
-            max_proj = f['max_proj'][:]  # type: ignore[index]
-        if max_proj.shape[1] > max_proj.shape[0]:
-            max_proj = np.rot90(max_proj, k=-1)
-        max_projs.append(max_proj)
+        mkv = entry['mkv_path']
+        time_t = _get_recording_time(mkv)
+        hours = get_hours_apf(time_0, time_t)
+        title = (time_t.strftime('%m%d_%H%M') if time_t is not None
+                 else os.path.relpath(os.path.dirname(mkv), main))
+        titles.append(title if hours is None else f'{title} - {hours}h APF')
 
-    # shared contrast from the per-image low/high percentiles
-    lows, highs = zip(*(np.percentile(m, CONTRAST_PCT) for m in max_projs))
-    vmin = float(np.percentile(lows, GRID_CONTRAST_PCT[0]))
-    vmax = float(np.percentile(highs, GRID_CONTRAST_PCT[1]))
-
-    # grid layout (same for all figures; fewer rows if there are few recordings)
-    # and split of the recordings into figures
-    cols = min(GRID_MAX_COLS, int(np.ceil(len(entries) / GRID_MAX_ROWS)))
-    rows = min(GRID_MAX_ROWS, int(np.ceil(len(entries) / cols)))
-    n_per_fig = rows * cols
-    fig_chunks = [range(i, min(i + n_per_fig, len(entries)))
-                  for i in range(0, len(entries), n_per_fig)]
-
-    for k, chunk in enumerate(fig_chunks):
-        fig, axes = plt.subplots(rows, cols, figsize=(22, 12 * rows / GRID_MAX_ROWS),
-                                 squeeze=False)
-        axes = axes.flatten()
-        for ax in axes:
-            ax.axis('off')
-
-        for i, idx in enumerate(chunk):
-            mkv = entries[idx]['mkv_path']
-            time_t = _get_recording_time(mkv)
-            hours = _get_hours_apf(mkv, time_0)
-            if time_t is not None:
-                title = time_t.strftime('%m%d_%H%M')
-            else:
-                title = os.path.relpath(os.path.dirname(mkv), main)
-            if hours is not None:
-                title += f' - {hours}h APF'
-            axes[i].imshow(max_projs[idx], cmap='gray', vmin=vmin, vmax=vmax)
-            axes[i].set_title(title, fontsize=10)
-
-        plt.tight_layout()
-
-        # save (add figure number to the name if there are several figures)
-        save_name = GRID_SAVE_NAME
-        if len(fig_chunks) > 1:
-            save_name = save_name.replace('.png', f'_{k + 1}.png')
-        plt.savefig(os.path.join(analysis_folder, save_name), dpi=300)
-        plt.close(fig)
+    for key, name in GRID_NAMES.items():
+        images = []
+        for entry in entries:
+            h5_path = os.path.join(os.path.dirname(entry['mkv_path']), PROJ_H5_NAME)
+            with h5py.File(h5_path, 'r') as f:
+                img = f[key][:]  # type: ignore[index]
+            if img.shape[1] > img.shape[0]:
+                img = np.rot90(img, k=-1)
+            images.append(img)
+        preanalysis.save_image_grid(images, titles, os.path.join(folder, name))
 
 
 if __name__ == '__main__':

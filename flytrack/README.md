@@ -5,14 +5,18 @@ packs 4 real frames). Run with the uv environment (`.venv`).
 
 1. `preprocess_flytrack.py`: for each recording, decode the videos and save
    `projection_images.h5` (median, min/max projections, std, per-frame activity), preview images,
-   an activity plot and a half-resolution summary video; recordings of one fly are aligned to
-   each other and summarised together (incl. grids of all activity traces in `00_activity`,
-   on a shared and on per-recording scales). Optional motion correction (`-m`). See its docstring for
+   an activity plot and a half-resolution summary video. The recordings of one fly (a long
+   recording) get no per-recording activity plots; instead they are aligned to each other and
+   summarised in `00_preanalysis` (grids of all activity traces, max projections and medians,
+   `mkv_paths.json` and the grouped projections, see `common/preanalysis.py`).
+   Optional motion correction (`-m`). See its docstring for
    the expected folder structures. E.g. `python preprocess_flytrack.py --folder path/to/folder`.
 2. `select_manual_roi.py`: draw one free-hand ROI per leg segment on a recording's std image, saved
    in `segment_rois.h5` (also works on SCAPE std images).
 3. `get_segmentation_data.py`: ROI-masked, activity-subsampled flattened video data per segment,
-   for segmentation (e.g. NMF, see `traces_2d/`).
+   for segmentation (e.g. NMF, see `traces_2d/`), from `00_preanalysis`.
+
+The frequency analysis of a long recording's activity is in `analysis/flytrack/`.
 
 Helpers: `flytrack_core.py` (constants and the per-recording processing used by
 `preprocess_flytrack.py`, plus `tif2mkv()` for raw tif exports), `flytrack_io.py` (loaders for

@@ -12,12 +12,15 @@ Pipeline 2: preprocess 3D muscle videos recorded on SCAPE. Run with the conda en
 - `preprocess_scape_exp.py`: for an experiment folder, fix the folder structure of each
   `sample#_run#` recording, compute its projection images (deskewed min/max/std projections and
   activity, `analysis/projection_images.h5` and OME-TIFFs; plus the median projection,
-  `median_proj`, for runs with fewer than 75 volumes, as it needs all the volumes at once),
+  `median_proj`, exact for runs with fewer than 75 volumes, else from 50 evenly spaced volumes,
+  as it needs all its volumes at once),
   combine the runs of each sample, and
   convert and deskew the high-resolution `_HR` volumes. For long recordings (folder name ending in the
-  puparium formation time, `..._MM-DD_HHhMM`, optionally followed by e.g. `_FAIL`) the runs'
-  activity plots go to `exp_folder/00_activity/`, named with hours APF, together with grids of
-  all (non-`_short`) runs' activity traces on a shared and on per-run scales. With
+  puparium formation time, `..._MM-DD_HHhMM`, optionally followed by e.g. `_FAIL`) the runs get
+  no individual activity plot; instead all (non-`_short`) runs are summarised in
+  `exp_folder/00_preanalysis/` (grids of the activity traces and of the max and median
+  projections, flattened over depth, see `common/preanalysis.py`; the frequency analysis is in
+  `analysis/scape/`). With
   `-l`/`--live` it runs alongside
   `transfer_scape_recordings.py`, preprocessing each run as soon as it is transferred, and
   combines the runs once no new run has appeared for 3 h (or on Ctrl+C). E.g.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Build ROI-masked, activity-subsampled flattened video data for segmentation
-(e.g. NMF) from a FlyTrack analysis folder.
+(e.g. NMF) from a FlyTrack analysis folder (`00_preanalysis`, see `preprocess_flytrack`).
 
 `get_segmentation_data(analysis_folder)` is the entry point. For every segment
 in `segment_rois.h5` (or, if that file is missing, a single 'all' segment
@@ -70,8 +70,10 @@ def get_segmentation_data(analysis_folder: str = '',
     Parameters
     ----------
     analysis_folder : str, optional
-        Path to a FlyTrack analysis folder (see `preprocess_flytrack`),
-        containing `projection_images_grouped.h5` and `mkv_paths.json`, and
+        Path to a FlyTrack analysis folder (`00_preanalysis` in the main folder
+        of a long recording, or an older `YYYY-MM-DD_analysis` one, see
+        `preprocess_flytrack`), containing `projection_images_grouped.h5` and
+        `mkv_paths.json`, and
         (recommended) `segment_rois.h5` from `select_manual_roi`. If empty, a
         directory-chooser dialog is opened.
     n_select : int, optional

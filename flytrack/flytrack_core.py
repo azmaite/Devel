@@ -81,8 +81,8 @@ MAX_PROJ_SAVE_NAME = 'max_proj.png'          # per-recording max projection
 MIN_PROJ_SAVE_NAME = 'min_proj.png'          # per-recording min projection
 SUMMARY_NAME = 'summary_video.mp4'           # per-recording downsampled preview
 SUMMARY_RAW_NAME = 'summary_video_raw.mp4'  # per-recording, uncorrected (after motion correction)
-MKV_PATHS_NAME = 'mkv_paths.json'            # in the analysis folder
-GROUPED_H5_NAME = 'projection_images_grouped.h5'  # in the analysis folder
+MKV_PATHS_NAME = 'mkv_paths.json'            # in 00_preanalysis (long recordings)
+GROUPED_H5_NAME = 'projection_images_grouped.h5'  # in 00_preanalysis (long recordings)
 CONFIG_NAME = 'config_concatenated.yaml'     # acquisition config, next to each .mkv
 
 # datasets required in projection_images.h5 for a recording to count as done.
@@ -834,13 +834,14 @@ def _plot_activity(mkv_file: str,
 
 def _process_mkv(mkv_file: str,
                  act_path: str | None = None,
-                 motion_correct: bool = False) -> tuple[list[int], int, float]:
+                 motion_correct: bool = False,
+                 plot_activity: bool = True) -> tuple[list[int], int, float]:
     """
     Decode one .mkv and write its projection images and metadata.
 
     Builds the projection images with `_decode_projections()` and saves them to
     `projection_images.h5` and `metadata.txt` in the same folder as the video,
-    plus the mean-fluorescence plot at `act_path`, the preview PNGs (see
+    plus the mean-fluorescence plot at `act_path` (if `plot_activity`), the preview PNGs (see
     `_write_pngs()`), and the half-resolution `summary_video.mp4` (fixed
     contrast from `_video_contrast()`, at the frame rate from
     `_get_framerate()`).
@@ -867,6 +868,9 @@ def _process_mkv(mkv_file: str,
         video.
     motion_correct : bool, optional
         Whether to correct rigid-translation drift.
+    plot_activity : bool, optional
+        Whether to save the activity plot (long recordings are summarized in a
+        grid instead, see `preprocess_flytrack.save_activity_summary()`).
 
     Returns
     -------
@@ -929,7 +933,8 @@ def _process_mkv(mkv_file: str,
 
     # save the preview PNGs and the mean fluorescence plot
     _write_pngs(h5_path)
-    _plot_activity(mkv_file, proj['act'], act_path)
+    if plot_activity:
+        _plot_activity(mkv_file, proj['act'], act_path)
 
     # plot the estimated drift over time and save as a png
     if proj['shifts'] is not None:

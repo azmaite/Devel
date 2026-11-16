@@ -14,10 +14,11 @@ which indices to keep (supports ranges, e.g. '2-5,7,9-12').
 Then, sample by sample, goes run by run and checks:
 - if the folder structure is correct (raw data inside a sub-subfolder)
 - if the max/min/std projections have been calculated already
-- for runs with fewer than 75 volumes (MEDIAN_MAX_VOLUMES), if the median projection has
-  been calculated already (it needs all the volumes at once, so longer runs get none)
+- if the median projection has been calculated already (exact for runs with fewer than 75
+  volumes, `scape_utils.MEDIAN_MAX_VOLUMES`; longer runs get an approximate median from 50
+  evenly spaced volumes, `scape_utils.MEDIAN_SAMPLES`, as it needs all its volumes at once)
 If any of these have not been done, it does it (a missing median alone is computed
-without recomputing the other projections).
+without recomputing the other projections, loading only the volumes it needs).
 Once all runs for a sample are done, if the sample has more than one (kept) run, it
 creates a new folder called sample#_combined and combines all the projections for that
 sample, before moving on to the next sample. Samples with a single run get no
@@ -25,20 +26,21 @@ sample#_combined folder (use the sample#_run# folder directly).
 
 Long recordings: if the experiment folder name ends with the puparium formation time
 (`..._MM-DD_HHhMM`, e.g. `20261023_V7xPR_pupa_long_scape_prepup_10-21_11h15`, optionally
-followed by a suffix such as `_FAIL`), each run's
-activity plot is saved in `<exp_folder>/00_activity/` instead of its analysis folder, named
-after the run plus its hours after puparium formation, e.g.
-`sample1_run03_20261023_1825_55hAPF.png` (as in `flytrack/preprocess_flytrack.py`). The
-recording time is `scanStartTimeApprox` from the run's `_info.mat`, or else the
+followed by a suffix such as `_FAIL`), the runs get no individual activity plot. Instead, at
+the end (also in live mode), every run except the `_short` ones is summarized in
+`<exp_folder>/00_preanalysis/` (see save_preanalysis and `common.preanalysis`, as in
+`flytrack/preprocess_flytrack.py`), each run labelled with its hours after puparium formation
+(hAPF):
+- `activity_shared.png` / `activity_own.png`: the saved `activity` traces (no raw data loaded)
+  in 3-column grids in time order (shared x and y limits with the subplots touching, so each
+  row reads as one continuous trace, or each subplot with its own y limits)
+- `max_projection_grid.png` / `median_grid.png`: every run's max / median projection, flattened
+  by averaging over depth (axis 0 of the deskewed (z, x, y) projection) and shown with its
+  true x/y aspect ratio, all with one shared contrast
+The recording time is `scanStartTimeApprox` from the run's `_info.mat`, or else the
 `_YYYYMMDD_HHMM` at the end of the run folder name; if neither is found the hAPF is omitted.
-Activity plots already in a run's analysis folder are moved there too (see
-collect_activity_plots). The sample#_combined activity plot stays in its folder.
-At the end (also in live mode), every run's activity except the `_short` runs (re-plotted
-from the saved `activity` trace, no raw data loaded) is summarized in a 3-column grid in time order, each subplot
-titled with its hAPF, as two figures in `00_activity` (see save_activity_summary):
-`00_summary_shared.png` (all subplots share the x and y limits and touch horizontally, so
-each row reads as one continuous trace) and `00_summary_own.png` (each subplot keeps its
-own y limits, y scale hidden).
+The sample#_combined activity plot stays in its folder. The frequency analysis of the activity
+is in `analysis/scape/`.
 
 Live mode (-l/--live): to run alongside `transfer_scape_recordings.py` during a long
 acquisition. There is no selection prompt; every run is preprocessed as soon as it has been
@@ -57,10 +59,9 @@ save_HR_deskewed_tif: deskew a converted HR nrrd and save it as a calibrated OME
 convert_HR_folders: convert all sample#_run#_HR subfolders of an experiment folder to a
     single (not deskewed) nrrd each, delete their raw .dat files, and save a deskewed
     OME-TIFF of each (see save_HR_deskewed_tif).
-collect_activity_plots: move the runs' `analysis/activity.png` plots of a long-recording
-    experiment into `<exp_folder>/00_activity/`, named with the hours APF.
-save_activity_summary: save the two grids of all of a long recording's activity traces in
-    `<exp_folder>/00_activity/` (can be run on its own, e.g. for experiments processed
+load_activity_traces: load the activity traces of a long-recording experiment's runs.
+save_preanalysis: save the activity, max projection and median grids of a long recording in
+    `<exp_folder>/00_preanalysis/` (can be run on its own, e.g. for experiments processed
     before it existed).
 preprocess_scape_exp: main function, converts the HR folders (see convert_HR_folders), then
     lists and preprocesses all other sample#_run# subfolders of an experiment folder, and
@@ -70,13 +71,9 @@ preprocess_scape_exp: main function, converts the HR folders (see convert_HR_fol
 
 import argparse
 import datetime
-import os
 import re
-import shutil
 import time
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog
 
 import h5py
 import numpy as np
@@ -84,12 +81,12 @@ import scapeio
 import tifffile
 
 import scape_utils
-from common.dialogs import sort_dialog_descending
+from common import preanalysis
+from common.dialogs import ask_directory
+from common.preanalysis import PREANALYSIS_FOLDER, get_hours_apf, get_time_0
 
-ACT_FOLDER = '00_activity'  # in the experiment folder (long recordings)
-ACT_SUMMARY_NAME = '00_summary_{}.png'  # in ACT_FOLDER; {} is 'shared' or 'own'
-ACT_SUMMARY_COLS = 3
-MEDIAN_MAX_VOLUMES = 75     # runs with fewer volumes also get a median projection
+# image grids in 00_preanalysis: dataset in projection_images.h5 -> file name
+GRID_NAMES = {'max_proj': 'max_projection_grid.png', 'median_proj': 'median_grid.png'}
 LIVE_POLL = 60              # live mode: seconds between checks for new runs
 LIVE_TIMEOUT_HOURS = 3      # live mode: stop after this long without a new run
 
@@ -260,31 +257,6 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
         save_HR_deskewed_tif(hr_path)
 
 
-def _get_time_0(exp_folder: str | Path) -> datetime.datetime | None:
-    """
-    Extract the puparium formation time from the name of the experiment folder.
-
-    Uses the last `MM-DD_HHhMM` in the folder name, so a suffix after it (e.g.
-    `_FAIL`) is allowed. The year is not encoded, so it is left as 1900 and set
-    per run in `_get_hours_apf()`.
-
-    Parameters
-    ----------
-    exp_folder : str | Path
-        Experiment folder whose name ends with the puparium formation time.
-
-    Returns
-    -------
-    datetime.datetime or None
-        Puparium formation time, or None if the folder name does not match.
-    """
-    matches = re.findall(r'(?<!\d)\d{2}-\d{2}_\d{2}h\d{2}(?!\d)', Path(exp_folder).name)
-    try:
-        return datetime.datetime.strptime(matches[-1], '%m-%d_%Hh%M')
-    except (IndexError, ValueError):
-        return None
-
-
 def _get_recording_time(scape_path: Path) -> datetime.datetime | None:
     """
     Get the start time of a run: `scanStartTimeApprox` from its `_info.mat`
@@ -319,56 +291,11 @@ def _get_recording_time(scape_path: Path) -> datetime.datetime | None:
     return None
 
 
-def _get_hours_apf(scape_path: Path,
-                   time_0: datetime.datetime | None) -> int | None:
+def load_activity_traces(exp_folder: str | Path) -> list[dict]:
     """
-    Calculate the hours after puparium formation (APF) of a run.
-
-    `time_0` carries no year, so it is given the recording's year (or the year
-    before, if that would put it after the recording, e.g. across New Year).
-
-    Parameters
-    ----------
-    scape_path : Path
-        The `sample#_run#` folder (see `_get_recording_time()`).
-    time_0 : datetime.datetime or None
-        Puparium formation time, see `_get_time_0()`.
-
-    Returns
-    -------
-    int or None
-        Hours APF, rounded to the nearest hour, or None if either time is
-        unknown.
-    """
-    time_t = _get_recording_time(scape_path)
-    if time_0 is None or time_t is None:
-        return None
-    t0 = time_0.replace(year=time_t.year)
-    if t0 > time_t:
-        t0 = t0.replace(year=time_t.year - 1)
-    return int(np.round((time_t - t0).total_seconds() / 3600))
-
-
-def _get_activity_path(exp_folder: Path,
-                       scape_path: Path,
-                       time_0: datetime.datetime | None) -> Path:
-    """
-    Get the save path of the activity plot of a run of a long recording:
-    `<exp_folder>/00_activity/<run name>_<hours>hAPF.png` (without the hAPF
-    if it is unknown), e.g. `sample1_run03_20261023_1825_55hAPF.png`.
-    """
-    hours = _get_hours_apf(scape_path, time_0)
-    name = scape_path.name + (f'_{hours}hAPF' if hours is not None else '')
-    return exp_folder / ACT_FOLDER / (name + '.png')
-
-
-def collect_activity_plots(exp_folder: str | Path) -> None:
-    """
-    Move the activity plot of every `sample#_run#` folder of a long-recording
-    experiment (`<run>/analysis/activity.png`) into `<exp_folder>/00_activity/`,
-    named with its hours APF (see `_get_activity_path()`). Does nothing if the
-    experiment folder name does not end with the puparium formation time
-    (`..._MM-DD_HHhMM`).
+    Load the activity traces of a long-recording experiment: the saved `activity` of every
+    run with projections, except the `_short` ones, in sample# then run# order, labelled with
+    its hours APF (plus the sample name if the experiment has several samples).
 
     Parameters
     ----------
@@ -377,119 +304,97 @@ def collect_activity_plots(exp_folder: str | Path) -> None:
 
     Returns
     -------
-    None
+    list[dict]
+        One trace per run, with keys 'name' (run folder name), 'title', 'hours' (int or None),
+        'activity' and 'fs' (the `scan_rate` attribute) (see `common.preanalysis`).
     """
     exp_folder = Path(exp_folder)
-    time_0 = _get_time_0(exp_folder)
-    if time_0 is None:
-        return
-    n_moved = 0
-    for scape_path in sorted(exp_folder.iterdir(), key=lambda p: p.name):
-        old_path = scape_path / scape_utils.ANALYSIS_PATH_NAME / 'activity.png'
-        if (not scape_path.name.startswith('sample') or '_run' not in scape_path.name
-                or not old_path.is_file()):
-            continue
-        new_path = _get_activity_path(exp_folder, scape_path, time_0)
-        new_path.parent.mkdir(exist_ok=True)
-        shutil.move(old_path, new_path)
-        n_moved += 1
-    if n_moved:
-        print(f'Moved {n_moved} activity plots to {exp_folder / ACT_FOLDER}')
-
-
-def save_activity_summary(exp_folder: str | Path) -> None:
-    """
-    Save grids of a long-recording experiment's activity traces in
-    `<exp_folder>/00_activity/`.
-
-    Every run with projections, except the `_short` ones, has its saved
-    `activity` re-plotted (time axis from the `scan_rate` attribute) in a grid
-    of `ACT_SUMMARY_COLS` columns, in sample# then run# order, each subplot
-    titled with its hours APF (plus the sample name if the experiment has
-    several samples). Two figures are saved (see `ACT_SUMMARY_NAME`): 'shared',
-    where every subplot has the same x and y limits and the subplots in a row
-    touch so the row reads as one continuous trace, and 'own', where each
-    subplot keeps its own y limits and the y scale is hidden. Does nothing if
-    the experiment folder name does not end with the puparium formation time.
-
-    Parameters
-    ----------
-    exp_folder : str | Path
-        Path to the experiment folder.
-
-    Returns
-    -------
-    None
-    """
-    import matplotlib
-    matplotlib.use('Agg')  # force a non-interactive backend
-    import matplotlib.pyplot as plt
-
-    exp_folder = Path(exp_folder)
-    time_0 = _get_time_0(exp_folder)
-    if time_0 is None:
-        return
-    run_paths = [p for p in _list_run_folders(exp_folder)
-                 if _has_projections(p) and '_short' not in p.name]
-    if len(run_paths) == 0:
-        return
+    time_0 = get_time_0(exp_folder)
+    run_paths = _long_run_folders(exp_folder)
     several_samples = len({p.name.split('_run')[0] for p in run_paths}) > 1
 
-    # load every run's trace
     traces = []
     for scape_path in run_paths:
         with h5py.File(scape_path / scape_utils.ANALYSIS_PATH_NAME
                        / scape_utils.PROJECTION_FILE_NAME, 'r') as f:
             activity = f['activity'][:]  # type: ignore[index]
             scan_rate = float(f.attrs['scan_rate'])  # type: ignore[arg-type]
-        hours = _get_hours_apf(scape_path, time_0)
+        hours = get_hours_apf(time_0, _get_recording_time(scape_path))
         title = scape_path.name if hours is None else f'{hours} hAPF'
         if hours is not None and several_samples:
             title = scape_path.name.split('_run')[0] + ' - ' + title
-        traces.append({'title': title, 'activity': activity,
-                       'time': np.arange(len(activity)) / scan_rate / 60})
-    print(f'Saving activity summary of {len(traces)} runs...')
+        traces.append({'name': scape_path.name, 'title': title, 'hours': hours,
+                       'activity': activity, 'fs': scan_rate})
+    return traces
 
-    n_rows = int(np.ceil(len(traces) / ACT_SUMMARY_COLS))
-    t_max = max(tr['time'][-1] for tr in traces)
-    y_min = min(tr['activity'].min() for tr in traces)
-    y_max = max(tr['activity'].max() for tr in traces)
-    y_pad = 0.03 * (y_max - y_min)
 
-    for scale in ('shared', 'own'):
-        fig, axes = plt.subplots(n_rows, ACT_SUMMARY_COLS,
-                                 figsize=(18, 1.6 * n_rows), squeeze=False)
-        for i, ax in enumerate(axes.flat):
-            if i >= len(traces):
-                ax.axis('off')
-                continue
-            tr = traces[i]
-            ax.plot(tr['time'], tr['activity'], linewidth=0.5)
-            ax.set_title(tr['title'], fontsize=9, pad=2)
-            if scale == 'shared':
-                ax.set_xlim(0, t_max)
-                ax.set_ylim(y_min - y_pad, y_max + y_pad)
-                if i % ACT_SUMMARY_COLS != 0:  # y ticks on the first column only
-                    ax.tick_params(left=False, labelleft=False)
-            else:
-                ax.set_xlim(0, tr['time'][-1])
-                ax.tick_params(left=False, labelleft=False)
-            if i + ACT_SUMMARY_COLS < len(traces):  # x labels on the last plot of each column
-                ax.tick_params(labelbottom=False)
-            else:
-                ax.set_xlabel('Time (min)', fontsize=8)
-            ax.tick_params(labelsize=7)
+def _long_run_folders(exp_folder: Path) -> list[Path]:
+    """
+    The runs of a long recording that are summarized: every run with projections, except the
+    `_short` ones, sorted by sample# then run#.
+    """
+    return [p for p in _list_run_folders(exp_folder)
+            if _has_projections(p) and '_short' not in p.name]
 
-        if scale == 'shared':
-            axes[n_rows // 2, 0].set_ylabel('Average fluorescence')
-        fig.suptitle(exp_folder.name, y=1.0)
-        fig.tight_layout()
-        if scale == 'shared':  # subplots in a row touch: one continuous trace
-            fig.subplots_adjust(wspace=0)
-        save_path = exp_folder / ACT_FOLDER / ACT_SUMMARY_NAME.format(scale)
-        save_path.parent.mkdir(exist_ok=True)
-        fig.savefig(save_path, dpi=200, bbox_inches='tight')
-        plt.close(fig)
+
+def _save_grids(exp_folder: Path) -> None:
+    """
+    Save grids of the runs' max and median projections (see `GRID_NAMES`) in
+    `<exp_folder>/00_preanalysis/`, each flattened by averaging over depth (axis 0 of the
+    deskewed (z, x, y) projection) and shown with its true aspect ratio (x voxel size over y
+    voxel size), labelled with its recording time and hours APF. Runs without a median
+    projection are left out of the median grid.
+    """
+    time_0 = get_time_0(exp_folder)
+    run_paths = _long_run_folders(exp_folder)
+    for key, name in GRID_NAMES.items():
+        images, titles, aspects = [], [], []
+        for scape_path in run_paths:
+            with h5py.File(scape_path / scape_utils.ANALYSIS_PATH_NAME
+                           / scape_utils.PROJECTION_FILE_NAME, 'r') as f:
+                if key not in f:
+                    continue
+                images.append(np.mean(f[key][:], axis=0))  # type: ignore[index]
+                voxel_x, voxel_y, _ = f['voxel_sizes_xyz'][:]  # type: ignore[index]
+            aspects.append(voxel_x / voxel_y)
+            time_t = _get_recording_time(scape_path)
+            hours = get_hours_apf(time_0, time_t)
+            title = time_t.strftime('%m%d_%H%M') if time_t is not None else scape_path.name
+            titles.append(title if hours is None else f'{title} - {hours}h APF')
+        if len(images) < len(run_paths):
+            print(f'{len(run_paths) - len(images)} runs have no {key}, left out of {name}.')
+        if len(set(aspects)) > 1:
+            print(f'Warning: the runs have different voxel sizes; {name} uses the first '
+                  f'run\'s aspect ratio.')
+        if images:
+            preanalysis.save_image_grid(images, titles, exp_folder / PREANALYSIS_FOLDER / name,
+                                        aspect=aspects[0], suptitle=exp_folder.name)
+
+
+def save_preanalysis(exp_folder: str | Path) -> None:
+    """
+    Save the pre-analysis plots of a long-recording experiment in
+    `<exp_folder>/00_preanalysis/`: the activity grids of its runs (see
+    `load_activity_traces()` and `common.preanalysis.save_activity_summary()`) and the grids of
+    their max and median projections (see `_save_grids()`). Does nothing if the experiment
+    folder name does not end with the puparium formation time (`..._MM-DD_HHhMM`).
+
+    Parameters
+    ----------
+    exp_folder : str | Path
+        Path to the experiment folder.
+
+    Returns
+    -------
+    None
+    """
+    exp_folder = Path(exp_folder)
+    if get_time_0(exp_folder) is None:
+        return
+    preanalysis.save_activity_summary(load_activity_traces(exp_folder),
+                                      exp_folder / PREANALYSIS_FOLDER, exp_folder.name,
+                                      ylabel='Average fluorescence', linewidth=0.5)
+    _save_grids(exp_folder)
 
 
 def _list_run_folders(exp_folder: Path) -> list[Path]:
@@ -531,15 +436,6 @@ def _has_median(scape_path: Path) -> bool:
         return 'median_proj' in f
 
 
-def _wants_median(scape_path: Path) -> bool:
-    """
-    Whether a run is short enough (fewer than `MEDIAN_MAX_VOLUMES` volumes) to
-    get a median projection.
-    """
-    _, num_volumes, _ = scapeio.get_scan_timing(str(scape_path / scape_path.name))
-    return num_volumes < MEDIAN_MAX_VOLUMES
-
-
 def _process_run(exp_folder: Path,
                  scape_path: Path,
                  time_0: datetime.datetime | None,
@@ -547,16 +443,15 @@ def _process_run(exp_folder: Path,
                  overwrite: bool) -> None:
     """
     Fix the folder structure of one run and compute its projection images,
-    unless they exist already (and not `overwrite`). Runs with fewer than
-    `MEDIAN_MAX_VOLUMES` volumes also get the median projection (computed on
-    its own if only it is missing). For long recordings (`time_0` known) the
-    activity plot goes to `00_activity` (see `_get_activity_path()`).
+    unless they exist already (and not `overwrite`), including the median projection
+    (computed on its own if only it is missing; exact or approximate, see
+    `scape_utils.get_median_projection`). Long recordings (`time_0` known) get no activity
+    plot (they are summarized in `00_preanalysis`, see `save_preanalysis()`).
     """
     scape_utils.check_folder_structure(scape_path)
-    median = _wants_median(scape_path)
     exists = _has_projections(scape_path)
     if exists and not overwrite:
-        if median and not _has_median(scape_path):
+        if not _has_median(scape_path):
             print(f'Projections already found for {scape_path.name}, but not the median '
                   f'projection. Computing it...')
             scape_utils.get_median_projection(scape_path, batch_size=batch_size)
@@ -564,12 +459,9 @@ def _process_run(exp_folder: Path,
             print(f'Projections already found for {scape_path.name}.')
         return
     print(f'Projections {"found, overwriting" if exists else "not found"} '
-          f'for {scape_path.name}. Computing them'
-          f'{" (with the median)" if median else ""}...')
-    activity_path = (_get_activity_path(exp_folder, scape_path, time_0)
-                     if time_0 is not None else None)
-    scape_utils.get_projection_images(scape_path, batch_size=batch_size,
-                                      activity_path=activity_path, median=median)
+          f'for {scape_path.name}. Computing them (with the median)...')
+    scape_utils.get_projection_images(scape_path, batch_size=batch_size, median=True,
+                                      plot_activity=time_0 is None)
 
 
 def _combine_samples(exp_folder: Path,
@@ -630,7 +522,7 @@ def _preprocess_live(exp_folder: Path,
     except KeyboardInterrupt:
         print('\nStopped by user (Ctrl+C).')
     _combine_samples(exp_folder, _list_run_folders(exp_folder))
-    save_activity_summary(exp_folder)
+    save_preanalysis(exp_folder)
 
 
 def preprocess_scape_exp(exp_folder: str | Path | None = None,
@@ -647,16 +539,16 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
     by sample# then run#, each with an index, and asks which indices to keep
     (supports ranges, e.g. `'2-5,7,9-12'`). Then, sample by sample, for each
     remaining run checks (and if needed fixes/computes) the folder structure
-    and projection images via `scape_utils` (plus the median projection for
-    runs with fewer than `MEDIAN_MAX_VOLUMES` volumes), and once all of a sample's runs
+    and projection images via `scape_utils` (including the median projection; exact for
+    runs with fewer than `scape_utils.MEDIAN_MAX_VOLUMES` volumes, else approximate), and
+    once all of a sample's runs
     are done, combines their projections into a new `sample#_combined` folder
     before moving on to the next sample. Samples with a single (kept) run get
     no `sample#_combined` folder.
     If the experiment folder name ends with the puparium formation time
-    (`..._MM-DD_HHhMM`), run activity plots are saved in (and existing ones
-    moved to) `<exp_folder>/00_activity/`, named with hours APF (see
-    `collect_activity_plots`), and at the end all runs' activity traces are
-    summarized there too (see `save_activity_summary`).
+    (`..._MM-DD_HHhMM`), the runs get no individual activity plot; instead, at
+    the end, all runs are summarized in `<exp_folder>/00_preanalysis/` (activity,
+    max projection and median grids, see `save_preanalysis`).
 
     In live mode (`live=True`), there is no selection prompt: every run is
     preprocessed as soon as it has been fully transferred to the server by
@@ -692,31 +584,16 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
     None
     """
     if exp_folder is None:
-        # some native (e.g. GTK/KDE portal) directory choosers ignore `initialdir` and
-        # default to the process's current working directory instead, so change into
-        # MAIN_PATH before opening the dialog as well
-        original_cwd = os.getcwd()
-        if os.path.isdir(scape_utils.MAIN_PATH):
-            os.chdir(scape_utils.MAIN_PATH)
-        else:
-            print(f'Warning: MAIN_PATH ({scape_utils.MAIN_PATH}) not found; dialog may not '
-                  'start there.')
-        root = tk.Tk()
-        root.withdraw()
-        sort_dialog_descending(root)  # newest (YYYYMMDD_...) folders first
-        selected = filedialog.askdirectory(initialdir=scape_utils.MAIN_PATH, title='Select experiment folder')
-        root.destroy()
-        os.chdir(original_cwd)
+        selected = ask_directory(scape_utils.MAIN_PATH, 'Select experiment folder')
         if not selected:
             print('No folder selected. Exiting.')
             return
         exp_folder = selected
     exp_folder = Path(exp_folder)
-    time_0 = _get_time_0(exp_folder)
+    time_0 = get_time_0(exp_folder)
     if time_0 is not None:
-        print(f'Long recording (puparium formation at {time_0:%m-%d %H:%M}): activity '
-              f'plots go to {exp_folder / ACT_FOLDER}, named with hours APF.')
-        collect_activity_plots(exp_folder)
+        print(f'Long recording (puparium formation at {time_0:%m-%d %H:%M}): the activity '
+              f'is summarized in {exp_folder / PREANALYSIS_FOLDER}, with hours APF.')
 
     if live:
         convert_HR_folders(exp_folder)
@@ -751,8 +628,8 @@ def preprocess_scape_exp(exp_folder: str | Path | None = None,
             _process_run(exp_folder, scape_path, time_0, batch_size, overwrite)
         _combine_samples(exp_folder, run_paths)
 
-    # long recordings: summary of every run's activity (not only the kept ones)
-    save_activity_summary(exp_folder)
+    # long recordings: analysis of every run's activity (not only the kept ones)
+    save_preanalysis(exp_folder)
 
 
 if __name__ == '__main__':
