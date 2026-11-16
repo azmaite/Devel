@@ -23,7 +23,10 @@ Two types of raw data:
 | 7. Align a 3D image to the matching 2D FlyTrack image | `traces_2d/` | planned |
 | 8. Extract time traces from a 2D video with the aligned, flattened 3D image and muscle map | `traces_2d/` | exploratory (NMF) |
 
-`common/` holds the helpers shared by several pipelines (data paths, masking, NMF, plotting).
+`common/` holds the helpers shared by several pipelines (data paths, masking, NMF, plotting, the
+long-recording pre-analysis and frequency analysis).
+`analysis/` holds the analyses of preprocessed FlyTrack and SCAPE long recordings (one subfolder
+each; e.g. the frequency analysis of the activity before eclosion).
 `visualization/` holds the scripts that make videos to check the results (e.g. of the master
 reference).
 Each folder has a README with its scripts, inputs and outputs.
