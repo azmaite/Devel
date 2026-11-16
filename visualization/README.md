@@ -1,0 +1,5 @@
+# visualization
+
+Scripts that make videos to check results (run with the conda environment `scapeio`).
+
+- `make_master_videos.py`: videos to check a master reference (built by `master_reference_3d/master_mean_generation/`), saved in `{master}/videos/{YYYYMMDD}`. They show the reference hemibody rotating with its muscle mask coloured by leg segment, and the master mean rotating or in slices with the registered hemibodies flickering on it. They also show the hemibodies before (rigid alignment only) and after registration, rotating or in slices, and the master mean rotating with the muscle split and the CT muscles shown one after the other (`rotate_muscles`, from `master_reference_3d/muscle_segmentation/`). E.g. `python make_master_videos.py --master_path .../master_reference/master_median --round_folder registered_hemibodies_round3 --videos rotate_reference rotate_master slices rigid_vs_registered rigid_vs_registered_slices rotate_muscles`. It imports the registration modules from `master_reference_3d/registration/` (and the reference's leg segments from `master_mean_generation/build_master_mean.py`).
