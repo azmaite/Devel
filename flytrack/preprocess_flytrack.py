@@ -46,8 +46,9 @@ next to the .mkv for independent recordings. For a single long recording it is
 saved in ``<main>/00_activity/`` instead, named after the path from the main
 folder to the recording folder plus the hours after puparium formation, e.g.
 ``20260730_141937_72hAPF.png``. The puparium-formation time is read from the
-end of the main folder name (``..._MM-DD_HHhMM``) and the recording time from
-the recording folder or .mkv name; if either is missing the hAPF is omitted.
+main folder name (``..._MM-DD_HHhMM``, optionally followed by a suffix such as
+``_FAIL``) and the recording time from the recording folder or .mkv name; if
+either is missing the hAPF is omitted.
 
 At the end of a single long recording, every processed recording's activity
 (re-plotted from the saved ``act``, no video decoding) is also summarized in a
@@ -508,9 +509,9 @@ def _get_time_0(main: str) -> datetime.datetime | None:
     """
     Extract the puparium formation time from the name of the main folder.
 
-    Uses the last two underscore-delimited tokens of the folder name (expected
-    format ``MM-DD_HHhMM``). The year is not encoded, so it is left as 1900 and
-    set per recording in `_get_hours_apf()`.
+    Uses the last ``MM-DD_HHhMM`` in the folder name, so a suffix after it
+    (e.g. ``_FAIL``) is allowed. The year is not encoded, so it is left as 1900
+    and set per recording in `_get_hours_apf()`.
 
     Parameters
     ----------
@@ -523,10 +524,11 @@ def _get_time_0(main: str) -> datetime.datetime | None:
         Puparium formation time, or None if the folder name does not match.
     """
 
+    matches = re.findall(r'(?<!\d)\d{2}-\d{2}_\d{2}h\d{2}(?!\d)',
+                         os.path.basename(main.rstrip('/')))
     try:
-        time_0_str = '_'.join(os.path.basename(main.rstrip('/')).split('_')[-2:])
-        return datetime.datetime.strptime(time_0_str, '%m-%d_%Hh%M')
-    except ValueError:
+        return datetime.datetime.strptime(matches[-1], '%m-%d_%Hh%M')
+    except (IndexError, ValueError):
         return None
 
 

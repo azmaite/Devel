@@ -15,8 +15,10 @@ Pipeline 2: preprocess 3D muscle videos recorded on SCAPE. Run with the conda en
   `median_proj`, for runs with fewer than 75 volumes, as it needs all the volumes at once),
   combine the runs of each sample, and
   convert and deskew the high-resolution `_HR` volumes. For long recordings (folder name ending in the
-  puparium formation time, `..._MM-DD_HHhMM`) the runs' activity plots go to
-  `exp_folder/00_activity/`, named with hours APF. With `-l`/`--live` it runs alongside
+  puparium formation time, `..._MM-DD_HHhMM`, optionally followed by e.g. `_FAIL`) the runs'
+  activity plots go to `exp_folder/00_activity/`, named with hours APF, together with grids of
+  all (non-`_short`) runs' activity traces on a shared and on per-run scales. With
+  `-l`/`--live` it runs alongside
   `transfer_scape_recordings.py`, preprocessing each run as soon as it is transferred, and
   combines the runs once no new run has appeared for 3 h (or on Ctrl+C). E.g.
   `python preprocess_scape_exp.py exp_folder [-b N] [-o]`.
@@ -24,6 +26,14 @@ Pipeline 2: preprocess 3D muscle videos recorded on SCAPE. Run with the conda en
   same sample.
 - `edit_labels_napari.py`: open a label tif in napari as an editable Labels layer next to the
   recording's projection.
+- `segment_muscles_activity.py`: naive split of leg segments (front femur and tibia, middle
+  tibia; both sides) into units active together, from long 10-min runs: (1) `extract` saves the
+  voxels of each segment (master leg segments mapped onto the run via the short run's
+  `master_registration_median`) for all volumes (`analysis/segment_voxel_traces.h5`, ~1.5 h per
+  run); (2) `segment` pools the runs of a fly, selects the most different active volumes, and
+  groups the voxels by seed correlation expansion (`00_muscle_activity_segmentation/` in the
+  experiment folder). Used to check the master muscle split and its CT match, and to look for
+  motor units.
 - `scape_utils.py`: shared SCAPE functions (folder structure, voxel size, projections, batch size,
   combining runs).
 
