@@ -4,19 +4,22 @@ Split SCAPE recordings into their two hemibodies, as isotropic volumes, and save
 Starts from the projection images of a recording (`{sample#_run#}/analysis/projection_images.h5`,
 with the projections in (Z, X, Y) order and `voxel_sizes_xyz`), which are computed in the `scape`
 folder (`scape/preprocess_scape_exp.py`). For each `sample#_run#` folder given, this:
-- loads the projection (`min_proj` by default) and resamples it to isotropic voxels
-  (`TARGET_VOXEL_SIZE` = 1.5 um by default), so that a tilted mirror plane is a proper reflection,
-- fits the (slightly tilted) mirror-symmetry plane of the whole volume, rotates the volume so the
-  plane is perpendicular to axis 2, and splits it there. The axis-2 >= plane side is flipped along
-  axis 2, so that both hemibodies have the same orientation,
+- loads the projection (`median_proj` by default, used for the master) and resamples it to
+  isotropic voxels (`TARGET_VOXEL_SIZE` = 1.5 um by default), so that a tilted mirror plane is a
+  proper reflection,
+- fits the (slightly tilted) mirror-symmetry plane of the whole volume (or takes it from the
+  `_split.json` of an earlier split of the same recording, `plane_from`, to get hemibodies on the
+  same grid), rotates the volume so the plane is perpendicular to axis 2, and splits it there.
+  The axis-2 >= plane side is flipped along axis 2, so that both hemibodies have the same
+  orientation,
 - saves the two hemibodies as `{experiment}_{run}_L.ome.tif` and `..._R.ome.tif` (float32, array
-  order (Z, X, Y) as in `projection_images.h5`, with
-  the isotropic voxel size in the OME metadata), plus a json with the fitted plane and a png
+  order (Z, X, Y) as in `projection_images.h5`, with the isotropic voxel size in the OME
+  metadata), plus a json with the fitted plane and a png
   showing the volume (red) over its mirror image (green), to check the plane.
 
 The plane fitting and splitting were first written for the SPAM pipeline (since removed).
 
-Run from the terminal (`python split_hemibodies.py run_folder [run_folder ...] -o out_folder`) or
+Run from the terminal (`python hemibodies.py run_folder [run_folder ...] -o out_folder`) or
 import and call `split_recording`.
 
 resample_to_isotropic: resample a (Z, X, Y) volume to isotropic voxels.
@@ -334,9 +337,10 @@ def hemibodies_to_original(left: np.ndarray,
 
 def split_recording(scape_path: str | Path,
                     out_folder: str | Path,
-                    proj_type: str = 'min_proj',
+                    proj_type: str = 'median_proj',
                     target_voxel_size: float = TARGET_VOXEL_SIZE,
-                    overwrite: bool = False) -> tuple:
+                    overwrite: bool = False,
+                    plane_from: str | Path | None = None) -> tuple:
     """
     Split one recording into its two isotropic hemibodies and save them (see the module docstring).
 
@@ -347,12 +351,17 @@ def split_recording(scape_path: str | Path,
         see the module docstring).
     out_folder : str | Path
         Folder to save the hemibodies in (created if needed).
-    proj_type : 'min_proj', 'max_proj' or 'std_image'
-        Projection to split.
+    proj_type : 'median_proj', 'min_proj', 'max_proj' or 'std_image'
+        Projection to split ('median_proj' only exists for runs of fewer than 75 volumes, see
+        `scape/preprocess_scape_exp.py`).
     target_voxel_size : float
         Isotropic voxel size, in um.
     overwrite : bool
         If False, recordings whose two hemibody tifs already exist are skipped.
+    plane_from : str | Path or None
+        `_split.json` of an earlier split of the same recording (e.g. of another projection),
+        whose plane is used instead of fitting one, so that the hemibodies are on the same grid.
+        None: fit the plane.
 
     Returns
     -------
@@ -376,7 +385,12 @@ def split_recording(scape_path: str | Path,
         voxel_sizes_xyz = f['voxel_sizes_xyz'][:]
 
     iso = resample_to_isotropic(projection, voxel_sizes_xyz, target_voxel_size)
-    theta_1, theta_2, offset_axis2, ncc = fit_symmetry_plane(iso)
+    if plane_from is None:
+        theta_1, theta_2, offset_axis2, ncc = fit_symmetry_plane(iso)
+    else:
+        plane = json.loads(Path(plane_from).read_text())
+        theta_1, theta_2, offset_axis2, ncc = (plane[k] for k in ('theta_1_rad', 'theta_2_rad',
+                                                                  'offset_axis2', 'symmetry_ncc'))
     print(f'{name}: {proj_type} {projection.shape} -> isotropic {iso.shape}; plane tilt '
           f'{np.degrees(theta_1):.2f} deg (axis 0), {np.degrees(theta_2):.2f} deg (axis 1), '
           f'offset {offset_axis2:.1f}, NCC {ncc:.4f}')
@@ -398,7 +412,7 @@ def split_recording(scape_path: str | Path,
                    'original_shape': list(projection.shape),
                    'isotropic_shape': list(iso.shape),
                    'theta_1_rad': theta_1, 'theta_2_rad': theta_2, 'offset_axis2': offset_axis2,
-                   'symmetry_ncc': ncc,
+                   'symmetry_ncc': ncc, 'plane_from': str(plane_from) if plane_from else None,
                    'L_shape': list(hemibodies[0].shape), 'R_shape': list(hemibodies[1].shape),
                    'R_flipped_along_axis2': True}, f, indent=2)
 
@@ -426,8 +440,8 @@ if __name__ == '__main__':
                                                  'hemibodies.')
     parser.add_argument('scape_paths', nargs='+', help='sample#_run# folders.')
     parser.add_argument('-o', '--out_folder', required=True, help='Output folder.')
-    parser.add_argument('-p', '--proj_type', default='min_proj',
-                        choices=['min_proj', 'max_proj', 'std_image'])
+    parser.add_argument('-p', '--proj_type', default='median_proj',
+                        choices=['median_proj', 'min_proj', 'max_proj', 'std_image'])
     parser.add_argument('-v', '--voxel_size', type=float, default=TARGET_VOXEL_SIZE,
                         help='Isotropic voxel size, in um.')
     parser.add_argument('--overwrite', action='store_true')

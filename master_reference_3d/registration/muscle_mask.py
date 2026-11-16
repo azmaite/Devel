@@ -1,8 +1,7 @@
 """
 Automatic muscle mask of a 3D fluorescence image of fly legs (e.g. an isotropic SCAPE hemibody,
-1.5 um voxels), for `label_mask_components.py`. Copied from the mask part of
-`auto_segment_muscles.py` (which also splits the mask into individual muscles), so
-that this folder is self-contained. Muscles are long bright tubes surrounded by darker tissue:
+1.5 um voxels), and its muscle clusters (connected components). Muscles are long bright tubes
+surrounded by darker tissue:
 
 1. Log-transform (fluorescence is multiplicative: a muscle is some factor brighter than its
    surroundings, whatever the local illumination) and subtract a smooth estimate of the local
@@ -20,17 +19,33 @@ On the left hemibody of the reference SCAPE recording (sample1_run3_short min pr
 isotropic voxels), the defaults recover 92% of the voxels of the manually segmented muscles. This
 is a binary mask: touching muscles are not separated.
 
+The muscle clusters of a hemibody (`label_hemibody`) are the connected components of its mask
+(face connectivity, so components touching only at an edge or corner stay separate), computed
+with the default settings except that components of at least `KEEP_VOLUME_UM3` are kept whatever
+their shape (the default elongation test drops bulky muscles, which matter here). They are
+numbered from 1 by decreasing size and saved as a plain uint32 tif (opens as a Labels layer in
+napari, same array shape and order as the image) as `{out_folder}/{image name}_components.tif`,
+with a json of the voxel count of each label, and a plain tif copy of the image
+(`{image name}_image.tif`, no scale) so both open together at scale 1.
+
 segment_muscles: segment the muscles of a 3D image and return a boolean mask.
 get_log_contrast: log-contrast of a 3D image relative to its local background, in robust
     standard deviations.
 filter_components: remove small and non-elongated connected components of a mask.
+label_components: muscle mask of an image, labelled by connected component (muscle cluster).
+label_hemibody: label the muscle clusters of one hemibody tif and save them.
 """
 
+import json
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import scipy.ndimage as ndi
+import tifffile
 from skimage.filters import apply_hysteresis_threshold
+
+KEEP_VOLUME_UM3 = 30000.0  # clusters: mask components this large skip the elongation test
 
 
 def get_log_contrast(volume: np.ndarray,
@@ -228,3 +243,70 @@ def segment_muscles(volume: np.ndarray,
             mask = np.moveaxis(np.stack([ndi.binary_fill_holes(plane)
                                          for plane in np.moveaxis(mask, axis, 0)]), 0, axis)
     return mask
+
+
+def label_components(image: np.ndarray,
+                     voxel_size_um: float = 1.5) -> np.ndarray:
+    """
+    Compute the automatic muscle mask of an image and label its connected components.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        3D image (isotropic voxels).
+    voxel_size_um : float
+        Voxel size, in um.
+
+    Returns
+    -------
+    np.ndarray
+        uint32 labels, 0 = background, 1..N by decreasing component size.
+    """
+    # large regions are kept whatever their shape, so that bulky muscles are not dropped
+    mask = segment_muscles(image, voxel_size_um=voxel_size_um, keep_volume_um3=KEEP_VOLUME_UM3)
+    labels, n = ndi.label(mask)
+    sizes = np.bincount(labels.ravel())[1:]
+    new_ids = np.zeros(n + 1, dtype=np.uint32)
+    new_ids[1 + np.argsort(-sizes, kind='stable')] = np.arange(1, n + 1, dtype=np.uint32)
+    return new_ids[labels]
+
+
+def label_hemibody(image_path: str | Path,
+                   out_folder: str | Path,
+                   voxel_size_um: float = 1.5) -> Path:
+    """
+    Label the muscle clusters of one hemibody tif and save them (see the module docstring).
+
+    Parameters
+    ----------
+    image_path : str | Path
+        Hemibody tif (e.g. from `hemibodies.py`).
+    out_folder : str | Path
+        Output folder (created if needed).
+    voxel_size_um : float
+        Voxel size, in um.
+
+    Returns
+    -------
+    Path
+        Path of the saved `{name}_components.tif`.
+    """
+    image_path, out_folder = Path(image_path), Path(out_folder)
+    out_folder.mkdir(parents=True, exist_ok=True)
+    name = image_path.name.removesuffix('.tif').removesuffix('.ome')
+    image = tifffile.imread(image_path)
+    labels = label_components(image, voxel_size_um)
+    labels_path = out_folder / f'{name}_components.tif'
+    tifffile.imwrite(labels_path, labels, compression='zlib')
+    # plain tif copy of the image (no OME scale), so it opens at the same scale (1) as the
+    # labels when both are dropped into napari
+    tifffile.imwrite(out_folder / f'{name}_image.tif', image.astype(np.float32))
+    sizes = np.bincount(labels.ravel())[1:]
+    with open(out_folder / f'{name}_components.json', 'w') as f:
+        json.dump({'image': str(image_path), 'array_axes': 'same as the image',
+                   'voxel_size_um': voxel_size_um,
+                   'voxels_per_label': {int(i): int(s) for i, s in
+                                        enumerate(sizes, start=1)}}, f, indent=1)
+    print(f'{name}: {len(sizes)} components, largest {sizes[:5].tolist()} voxels, '
+          f'{(sizes < 1000).sum()} under 1000 voxels')
+    return labels_path

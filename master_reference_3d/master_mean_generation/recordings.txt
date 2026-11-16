@@ -1,0 +1,13 @@
+# Recordings whose median projections are registered and averaged into the master
+# (read by build_master_mean.py). One `sample#_run#` folder per line, relative to SCAPE_PATH
+# (common/paths.py), optionally followed by L or R to use only that hemibody.
+# Lines starting with # are ignored.
+20261016_V7xPR_pupa_long_paired/sample1_run3_short
+20261021_V7xPR_pupa_long_paired_early/sample1_run1 R
+20261021_V7xPR_pupa_long_scape_prepup_10-19_09h05_FAIL/sample1_run01_short_20261021_1638
+20261023_V7xPR_pupa_long_paired/sample1_run1_short
+20261023_V7xPR_pupa_long_scape_prepup_10-21_11h15/sample1_run01_short_20261023_1620
+20261028_V7xPR_pupa_long_paired/sample1_run01_short_20261028_1613
+20261028_V7xPR_pupa_long_scape_prepup_10-26_09h25/sample1_run01_short_20261028_1622
+20261030_V7xPR_pupa_long_paired/sample1_run1_short
+20261030_V7xPR_pupa_long_scape_prepup_10-28_09h30/sample1_run01_short_20261030_1719

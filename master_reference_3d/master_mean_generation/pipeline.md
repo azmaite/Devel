@@ -8,10 +8,10 @@
 
 1. **Volume preparation.**
 
-   - Each recording (about 60 s, 46–53 volumes) was deskewed, and the per-voxel minimum over time (minimum projection) was taken as a resting-state image.
+   - Each recording (about 60 s, under 75 volumes) was deskewed, and the per-voxel median over time (median projection) was taken as a resting-state image.
    - The volume was resampled to isotropic 1.5 µm voxels (linear interpolation).
    - The left–right mirror plane was found by maximising the normalised cross-correlation between the volume and its own reflection (Nelder–Mead on a 5× downsampled copy, optimising two tilt angles and an offset).
-   - The volume was rotated so that this plane was perpendicular to one axis, split at the plane, and the right half was mirrored. This gave two hemibodies of the same handedness per animal: six hemibodies from three animals.
+   - The volume was rotated so that this plane was perpendicular to one axis, split at the plane, and the right half was mirrored. This gave two hemibodies of the same handedness per animal (the recordings and any hemibody left out are listed in `recordings.txt`).
 
 2. **Muscle masks.** Each hemibody was segmented automatically.
 
@@ -24,6 +24,7 @@
 3. **Reference leg segments.**
 
    - In one hemibody with complete hind-leg segments (the reference), each muscle cluster was assigned by hand to a leg segment: coxa/thorax, trochanter, femur and tibia of the front, middle and hind legs, or head.
+   - This was done on the muscle clusters of the reference's minimum projection (an earlier version of the master). The reference's median projection was split with the same mirror plane, so both are on the same grid; each voxel of its median muscle mask takes the leg segment of the nearest hand-labelled voxel within 10 µm.
    - This gives one leg-segment mask per segment.
    - The head was excluded from registration (see step 4).
    - No other hemibody needs segment labels.
@@ -66,9 +67,9 @@
 
 7. **Iteration.**
 
-   - *Round 1:* the template was the reference hemibody's leg-segment masks. The other five hemibodies were registered to it, and the reference entered the average unchanged.
-   - *Round 2:* the template was the round-1 master muscle mask with its leg-segment identities. All six hemibodies, the reference included, were registered to it, so the template shape is the consensus of all animals rather than one animal's.
-   - Further rounds repeat round 2 with the previous round's master mask, until the results converge (three rounds here).
+   - *Round 1:* the template was the reference hemibody's leg-segment masks. The other hemibodies were registered to it, and the reference entered the average unchanged.
+   - *Round 2:* the template was the round-1 master muscle mask with its leg-segment identities. All hemibodies, the reference included, were registered to it, so the template shape is the consensus of all animals rather than one animal's.
+   - Round 3 repeats round 2 with the round-2 master mask.
    - The last round's master image and master leg-segment masks form the master reference. New recordings are registered to it with steps 1, 2, 4 and 5, which need no manual labelling.
    - The coordinate frame (overall pose) remains that of the round-1 reference.
 
@@ -76,4 +77,5 @@
 
    - A new recording is prepared and masked as in steps 1–2, and each of its hemibodies is registered to the master muscle mask (with its leg-segment identities) as in step 4.
    - To analyse the recording without deforming it, labels defined on the master (leg segments, or identified muscles) are brought back onto the recording instead. For each hemibody voxel, the master positions given by the segment transforms are averaged, blended as in step 5, around the master segments as placed in the hemibody by their own transforms. The label map is sampled there (nearest label).
-   - The hemibody labels are then mapped back through the hemibody split (mirror, rotation and isotropic resampling, inverted) onto the voxel grid of the recording's original minimum projection.
+   - The hemibody labels are then mapped back through the hemibody split (mirror, rotation and isotropic resampling, inverted) onto the voxel grid of the recording's original median projection.
+   - The master image is brought back the same way, with linear interpolation, so the master can be compared with the undeformed recording.

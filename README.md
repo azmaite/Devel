@@ -17,13 +17,15 @@ Two types of raw data:
 | 1. Preprocess 2D FlyTrack videos | `flytrack/` | working |
 | 2. Preprocess 3D SCAPE videos | `scape/` | working |
 | 3. Preprocess 3D labels of a CT scan (WebKnossos) | `ct_scan/` | label loading working |
-| 4. Build a master 3D image (master muscle map, later registered to the CT labels) | `master_reference_3d/` | working |
+| 4. Build a master 3D image (master muscle map, later registered to the CT labels) | `master_reference_3d/master_mean_generation/` (muscle identities: `master_reference_3d/muscle_segmentation/`) | working (muscle identities in progress) |
 | 5. Align 3D videos to the master | `master_reference_3d/` (`register_recording.py`) | working |
 | 6. Extract time traces from a 3D video with the aligned master muscle map | `master_reference_3d/` | planned |
 | 7. Align a 3D image to the matching 2D FlyTrack image | `traces_2d/` | planned |
 | 8. Extract time traces from a 2D video with the aligned, flattened 3D image and muscle map | `traces_2d/` | exploratory (NMF) |
 
 `common/` holds the helpers shared by several pipelines (data paths, masking, NMF, plotting).
+`visualization/` holds the scripts that make videos to check the results (e.g. of the master
+reference).
 Each folder has a README with its scripts, inputs and outputs.
 
 Data flow: FlyTrack videos -> `flytrack/` (projections, summary videos, ROIs); SCAPE recordings ->

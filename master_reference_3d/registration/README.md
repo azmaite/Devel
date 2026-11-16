@@ -1,0 +1,8 @@
+# registration
+
+Shared modules of the master reference (run with the conda environment `scapeio`), used to build the master (`../master_mean_generation/`), to register new recordings to it (`../register_recording.py`), and by `../muscle_segmentation/` and the top-level `visualization/`. The method is described in `../master_mean_generation/pipeline.md`. Other folders import these modules by adding this folder to `sys.path`.
+
+- `hemibodies.py`: loads a projection of a recording (the median by default), resamples it to isotropic 1.5 um voxels, fits the left-right symmetry plane (or reuses one from an earlier split) and saves the two hemibodies (R mirrored) as OME-TIFFs, with a json of the plane and a png to check it. `hemibodies_to_original` maps hemibody volumes back onto the original projection.
+- `muscle_mask.py`: the automatic muscle mask (log-contrast to the local background, hysteresis threshold, removal of small or non-elongated components), and its muscle clusters (connected components), saved as napari Labels tifs next to a scale-1 copy of the image (`label_hemibody`).
+- `deformation.py`: registers a hemibody to a template muscle mask labelled by leg segment (global fit, then one fit per leg segment; the head gets no fit of its own), and brings it into the template grid with one smooth deformation that blends the segment transforms in the gaps between segments. Also the per-segment overlap scores and small helpers (padding, transforms to and from json, Dice).
+- `register_segments.py`: the shape fits themselves (signed distance maps of the masks, fit restricted to the inside of the template segment, target field of view handled as unknown; rigid then affine), used by `deformation.py`.
