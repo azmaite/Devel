@@ -17,6 +17,10 @@ picked yet). Saved in `<exp_folder>/00_frequency_analysis/` (see `common.power_s
 - `power_spectrum_heatmap_relative.png`: hAPF against frequency, the normalized power relative
   to its mean over the runs
 
+Each plot is also copied to `_analysis/` next to the experiment folder (in the SCAPE folder),
+named with the experiment date (`power_spectrum_log_YYYYMMDD.png`), to compare experiments,
+and the experiment is added to `_analysis/experiments.csv` (with its eclosion and a comment).
+
 Run with the conda environment `scapeio`. Example usages from the terminal:
     python frequency_analysis.py
     python frequency_analysis.py path/to/exp_folder

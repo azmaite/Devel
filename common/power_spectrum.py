@@ -23,10 +23,17 @@ save_band_power: save the power in each of several frequency bands against hours
 save_relative_heatmap: save the normalized power spectra of many traces as a heatmap (hours APF
     against frequency), each frequency relative to its mean over the traces.
 save_frequency_analysis: save all of these for the recordings of a long recording before
-    eclosion, in `<experiment folder>/FREQUENCY_FOLDER`.
+    eclosion, in `<experiment folder>/FREQUENCY_FOLDER`, and a copy of each in the
+    `COMMON_FOLDER` next to the experiment folders, named with the experiment date.
+copy_to_common_folder: copy an experiment's plots to that common folder.
+update_experiment_list: add an experiment to the `EXPERIMENT_LIST` of that common folder (its
+    eclosion, and a comment to fill in by hand), or update its eclosion.
 """
 
+import csv
 import os
+import re
+import shutil
 from typing import Literal
 
 import matplotlib.pyplot as plt
@@ -34,6 +41,13 @@ import numpy as np
 from scipy import ndimage, signal
 
 FREQUENCY_FOLDER = '00_frequency_analysis'  # in the experiment (main) folder
+# the plots of every experiment, side by side: next to the experiment folders (e.g. in the SCAPE
+# folder), each plot named with the experiment date, `<plot name>_YYYYMMDD.png`
+COMMON_FOLDER = '_analysis'
+# in COMMON_FOLDER: one row per analysed experiment, sorted by name (i.e. date), with its
+# eclosion and a free comment (edit the comments by hand; they are kept when the list is updated)
+EXPERIMENT_LIST = 'experiments.csv'
+EXPERIMENT_LIST_COLUMNS = ['experiment', 'eclosion_recording', 'eclosion_hAPF', 'comment']
 PSD_SUMMARY_NAME = 'power_spectrum_{}{}.png'  # {} are the frequency scale and an optional suffix
 WINDOW_S = 60.0       # Welch window length (s); also sets the lowest frequency (1 / WINDOW_S)
 BASELINE_PCT = 10     # dF/F baseline percentile
@@ -342,8 +356,11 @@ def save_frequency_analysis(exp_folder: str | os.PathLike,
     Save the frequency analysis of a long recording, using only the recordings before
     eclosion, in `<exp_folder>/FREQUENCY_FOLDER`: the overlaid power spectra with a log and a
     linear frequency axis, and normalized with a log one (see `save_power_spectrum_summary()`),
-    the band power against hours APF (see `save_band_power()`), and the heatmap of the normalized spectra relative to their mean (see
-    `save_relative_heatmap()`).
+    the band power against hours APF (see `save_band_power()`), and the heatmap of the
+    normalized spectra relative to their mean (see `save_relative_heatmap()`). Each plot is also
+    copied to the `COMMON_FOLDER` next to the experiment folder (see `copy_to_common_folder()`),
+    so the same plot of every experiment is in one place, and the experiment is added to the
+    list of experiments there (see `update_experiment_list()`).
 
     The eclosion recording is read from the experiment's eclosion file (see
     `common.eclosion`); if there is none (or `pick_eclosion`), the user is asked to pick it.
@@ -390,4 +407,89 @@ def save_frequency_analysis(exp_folder: str | os.PathLike,
     save_band_power(before, folder, suptitle=suptitle)
     save_relative_heatmap(before, folder, suptitle=suptitle)
     print(f'Saved the frequency analysis in {folder}')
+    copy_to_common_folder(exp_folder, folder)
+    update_experiment_list(exp_folder, traces, index)
     return folder
+
+
+def copy_to_common_folder(exp_folder: str | os.PathLike,
+                          folder: str | os.PathLike) -> str:
+    """
+    Copy the plots (.png) of an experiment's analysis `folder` to the `COMMON_FOLDER` next to
+    the experiment folder, adding the experiment date to their names
+    (`power_spectrum_log.png` -> `power_spectrum_log_YYYYMMDD.png`), so the same plot of every
+    experiment is listed together. Copies of an earlier run are overwritten.
+
+    Parameters
+    ----------
+    exp_folder : str or os.PathLike
+        The experiment (main) folder, its name starting with the date (`YYYYMMDD_...`).
+    folder : str or os.PathLike
+        The folder with the plots to copy.
+
+    Returns
+    -------
+    str
+        The common folder.
+    """
+    exp_folder = os.path.normpath(exp_folder)
+    name = os.path.basename(exp_folder)
+    match = re.match(r'\d{8}', name)
+    date = match.group() if match else name
+    common = os.path.join(os.path.dirname(exp_folder), COMMON_FOLDER)
+    os.makedirs(common, exist_ok=True)
+    for file in sorted(os.listdir(folder)):
+        stem, ext = os.path.splitext(file)
+        if ext == '.png':
+            shutil.copyfile(os.path.join(folder, file), os.path.join(common, f'{stem}_{date}{ext}'))
+    print(f'Copied the plots to {common}')
+    return common
+
+
+def update_experiment_list(exp_folder: str | os.PathLike,
+                           traces: list[dict],
+                           eclosion_index: int) -> str:
+    """
+    Add an experiment to the `EXPERIMENT_LIST` csv in the `COMMON_FOLDER` next to it, or update
+    its eclosion if it is already listed (its comment is kept). The rows are sorted by
+    experiment name, i.e. by date.
+
+    Parameters
+    ----------
+    exp_folder : str or os.PathLike
+        The experiment (main) folder.
+    traces : list of dict
+        Its recordings' traces (see module docstring, each with a 'name' and a 'title'), in
+        time order.
+    eclosion_index : int
+        Index of the eclosion recording in `traces`, `len(traces)` if the fly did not eclose.
+
+    Returns
+    -------
+    str
+        The path of the list.
+    """
+    exp_folder = os.path.normpath(exp_folder)
+    path = os.path.join(os.path.dirname(exp_folder), COMMON_FOLDER, EXPERIMENT_LIST)
+    rows = {}
+    if os.path.exists(path):
+        with open(path, newline='') as f:
+            rows = {row['experiment']: row for row in csv.DictReader(f)}
+    name = os.path.basename(exp_folder)
+    row = rows.setdefault(name, {'experiment': name, 'comment': ''})
+    if eclosion_index < len(traces):
+        trace = traces[eclosion_index]
+        row['eclosion_recording'] = trace['name']
+        hours = trace.get('hours')
+        row['eclosion_hAPF'] = f'{hours:.0f}' if hours is not None else ''
+    else:
+        row['eclosion_recording'] = 'none'
+        row['eclosion_hAPF'] = ''
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, EXPERIMENT_LIST_COLUMNS, extrasaction='ignore', restval='')
+        writer.writeheader()
+        for key in sorted(rows):
+            writer.writerow(rows[key])
+    print(f'Updated the list of experiments {path}')
+    return path
