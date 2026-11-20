@@ -3,6 +3,10 @@
 Pipeline 2: preprocess 3D muscle videos recorded on SCAPE. Run with the conda environment
 `scapeio`.
 
+Warning: in napari's default 3D view (depth axis `'towards'`, napari >= 0.6), the deskewed
+OME-TIFFs look left-right mirrored, although the data are not. Set napari's depth axis to
+`'away'`; see "Warning: napari 3D views can look mirrored" in the root `README.md`.
+
 - `transfer_scape_recordings.py`: runs on the SCAPE PC during acquisition, and moves each finished
   recording to the server (so the SCAPE PC disk does not fill up). Each run is renamed on the SCAPE
   PC as soon as it finishes (`sample1_run##_YYYYMMDD_HHMM`, numbered in order), so the acquisition

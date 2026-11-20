@@ -47,3 +47,30 @@ works everywhere:
 - conda environment `scapeio` (SCAPE and the master reference): `pip install -e . --no-deps`.
 
 Data locations are set in `common/paths.py`.
+
+## Warning: napari 3D views can look mirrored
+
+Since napari 0.6, the default 3D camera has the depth axis pointing **towards** the viewer
+(`'towards'`; before 0.6 it was `'away'`). With that default, a 3D render of our deskewed SCAPE
+volumes (ZYX OME-TIFFs, z = 0 at the objective/glass) is the **mirror image** of the real sample,
+so left and right are swapped. 2D views, slices and z-projections are not affected.
+
+The data are not mirrored: checked on 2026-11-20 by imaging the asymmetric tip of a fluorescent
+tape through the glass on SCAPE, FlyTrack and an epifluorescence scope
+(`20261119_test-microscope-mirroring`). The SCAPE z-projection (rows = Y, columns = X, seen from
+z = 0) matches the FlyTrack image and the photo by a rotation alone, with no flip. Nothing in
+`scapeio` loading/deskewing, `scape/preprocess_scape_exp.py` or the napari OME-TIFF reader
+flips an axis.
+
+So:
+- Set napari's depth axis to `'away'` in every environment with napari (done in `scapeio`):
+  File -> Preferences -> Application -> Depth Axis Orientation -> Away, or
+  `napari.settings.get_settings().application.depth_axis_orientation = 'away'` (saved
+  per environment). In a script, `viewer.camera.orientation = ('away', 'down', 'right')` does the
+  same for one viewer. `scape_view` (scapeio) already sets `'away'` itself.
+- When matching SCAPE to FlyTrack (pipeline 7), use the arrays (a z-projection of the ZYX volume)
+  rather than what a 3D view shows: both are imaged through the glass, so they match up to
+  rotation, scale and translation, never a flip.
+- `scape_view -s` (deskewed) probably still shows a mirrored view (it keeps `'away'` but its
+  deskewed axes are in a different order); judge left and right from its raw view or from the
+  OME-TIFFs.

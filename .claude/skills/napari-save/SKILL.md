@@ -49,6 +49,10 @@ Conventions in this repo (SCAPE):
 - Swapping between the two image conventions is `.transpose(0, 2, 1)`.
 - Say in the output docstring/json which order was used (`'axes': 'zyx'`), and when loading a label tif to overlay on `load_proj`, transpose it if its order differs (pattern in `scape/edit_labels_napari.py`).
 
+## Mirrored-looking 3D views: never flip the data to fix them
+
+napari >= 0.6 defaults to a depth axis pointing `'towards'` the viewer, which makes 3D renders of our ZYX volumes (z = 0 at the objective/glass) look left-right mirrored. The data are correct (verified against FlyTrack and an epifluorescence photo, see "Warning: napari 3D views can look mirrored" in the root `README.md`). Fix the view, not the file: napari preference Depth Axis Orientation = Away (set in `scapeio`), or `viewer.camera.orientation = ('away', 'down', 'right')`. Do not save flipped arrays or negative scales to "fix" it.
+
 ## Check before declaring it done
 
 1. Shapes: `labels.shape == image.shape` for the image it overlays (`load_proj` order or OME order, see above).
