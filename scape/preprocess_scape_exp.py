@@ -52,6 +52,9 @@ there), checking for new runs every minute. When no new run has appeared for 3 h
 Can be run from the terminal (`python preprocess_scape_exp.py [exp_folder] [-b N] [-o] [-l]`)
 or imported and called as a function. If `exp_folder` is not given, a folder-selection dialog
 opens, starting in `scape_utils.MAIN_PATH`, with the newest (`YYYYMMDD_...`) folders on top.
+Runs converted to a single `sample#_run#/sample#_run#.ozx` file (`scapeio convert`) are
+read from it (much faster than the .dat files; see `scape_utils.RawRecording`), and need no
+`_info.mat`.
 The number of volumes loaded per batch when computing projections is chosen automatically
 from each run's volume size, unless given with -b. With -o/--overwrite, projections are
 recomputed even if they already exist.
@@ -172,8 +175,10 @@ def save_HR_deskewed_tif(hr_path: str | Path) -> Path:
         return tiff_path
 
     print(f'Deskewing {hr_path.name} and saving it as a tif...')
-    raw_volume = scapeio.load_scan(str(raw_path), colors=1, try_loading_copies=['nrrd'])
-    deskewed = scapeio.operations.deskew_scan(str(raw_path), images=raw_volume)
+    raw_volume = scapeio.load_scan(str(raw_path), colors=1, demotioned=False,
+                                   try_loading_copies=['nrrd'])
+    deskewed = scapeio.operations.deskew_scan(str(raw_path), scape_utils.TUBE_LENS,
+                                              images=raw_volume)
     del raw_volume
     if np.issubdtype(deskewed.dtype, np.floating):
         deskewed = np.clip(np.rint(deskewed), 0, np.iinfo(np.uint16).max).astype(np.uint16)
@@ -242,7 +247,8 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
                 print(f'nrrd already found for {raw_path}, checking it...')
 
             # check the nrrd loads back fine before deleting the raw data
-            volume = scapeio.load_scan(raw_path, colors=1, try_loading_copies=['nrrd'])
+            volume = scapeio.load_scan(raw_path, colors=1, demotioned=False,
+                                       try_loading_copies=['nrrd'])
             if volume.ndim != 3 or volume.size == 0 or not volume.any():
                 raise RuntimeError(f'{nrrd_path} loaded back as an empty or non-3D volume '
                                    f'(shape {volume.shape}). Raw .dat files were NOT deleted.')
@@ -261,8 +267,9 @@ def convert_HR_folders(exp_folder: str | Path) -> None:
 def _get_recording_time(scape_path: Path) -> datetime.datetime | None:
     """
     Get the start time of a run: `scanStartTimeApprox` from its `_info.mat`
-    (inside the run folder, or next to it as acquired), or else the
-    `_YYYYMMDD_HHMM` at the end of the run folder name.
+    (inside the run folder, or next to it as acquired) or its `.ozx` (see
+    `scape_utils.get_ozx_path`), or else the `_YYYYMMDD_HHMM` at the end of the
+    run folder name.
 
     Parameters
     ----------
@@ -286,6 +293,14 @@ def _get_recording_time(scape_path: Path) -> datetime.datetime | None:
                                               '%d-%b-%Y %H:%M:%S')
         except Exception:
             break
+    ozx_path = scape_utils.get_ozx_path(scape_path)
+    if ozx_path is not None:
+        try:
+            meta = scape_utils.OzxArray(ozx_path).attrs['scape']
+            return datetime.datetime.strptime(str(meta['acquisition']['scanStartTimeApprox']),
+                                              '%d-%b-%Y %H:%M:%S')
+        except Exception:
+            pass
     m = re.search(r'_(\d{8})_(\d{4})$', scape_path.name)
     if m:
         return datetime.datetime.strptime(m[1] + m[2], '%Y%m%d%H%M')
@@ -413,10 +428,12 @@ def _is_transferred(scape_path: Path) -> bool:
     """
     Whether a run has been fully transferred to the server: its `_info.mat`,
     which `transfer_scape_recordings.py` moves last, is inside the run folder
-    (or next to it, as acquired).
+    (or next to it, as acquired), or it has a `.ozx` (which `scapeio convert`
+    only gives its final name once it is complete and checked).
     """
     info_name = f'{scape_path.name}_info.mat'
-    return (scape_path / info_name).is_file() or (scape_path.parent / info_name).is_file()
+    return ((scape_path / info_name).is_file() or (scape_path.parent / info_name).is_file()
+            or scape_utils.get_ozx_path(scape_path) is not None)
 
 
 def _has_projections(scape_path: Path) -> bool:

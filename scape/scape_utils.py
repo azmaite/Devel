@@ -9,6 +9,8 @@ It assumes the following folder structure (if not, it will fix it):
 ---- sample#_run# : subfolder folder containing raw data (.dat) files (scape_raw_path)
 ---- sample#_run#_info.mat : metadata file for the SCAPE recording
 ---- sample#_run#_stim_data.bin : DAQ voltage traces for the SCAPE recording
+---- sample#_run#.ozx : (instead of the three above) the whole recording, losslessly
+     compressed in a single file by `scapeio convert` (see RawRecording)
 ---- analysis : folder containing analysis results (analysis_path)
 --- analysis_sample# : folder containing analysis results for several recordings for the 
     same sample (analysis_combined_path)
@@ -24,7 +26,14 @@ check_folder_structure: check if the folder structure is correct for SCAPE data 
     subfolder with the same name and whether the matching _info.mat/_stim_data.bin files are
     next to it). If not, it will fix it by moving the files. Raises errors if the structure is
     not correct and cannot be fixed. A no-op for a sample#_combined folder, which has no raw
-    data of its own.
+    data of its own. A run with a .ozx needs no _info.mat (it is inside the .ozx).
+get_ozx_path: get the .ozx archive of a sample#_run# folder, if it has one
+RawRecording: the raw volumes and metadata of a single run, read from its .ozx archive if it
+    has one (only the volumes asked for, decoded in parallel; much faster from the server
+    than the .dat files), else from its .dat files with scapeio. Volumes from both have
+    camera rows cropped as `scapeio.load_scan` does, but a .ozx volume has 2 planes fewer
+    (the flyback frames, which the .dat volumes include, see RawRecording), so projections
+    from a .ozx and from .dat files of the same run differ in shape by 2 planes in x
 load_voxel_size: get voxel size of a deskewed scape 3D video (XYZ). For a sample#_combined
     folder, read back from its max_proj.ome.tif metadata instead of raw data, which it
     doesn't have.
@@ -42,13 +51,18 @@ get_projection_images: compute the std, maximum, and minimum projection images, 
     (activity) calibrated with the recording's voxel size / volume rate for napari and
     easy viewing (the activity PNG can be saved elsewhere, or skipped for long recordings,
     see `preprocess_scape_exp`). Optionally (`median=True`) also the
-    median projection, in the same pass
+    median projection, in the same pass. Everything is computed on the raw volumes
+    (uint16 data, exact uint64 sums, on several threads, loading the next batch while
+    the current one is processed), and only the final projections are deskewed
+    (more accurate, and much faster than deskewing every volume)
 get_median_projection: compute only the median projection of a SCAPE 3D video and add it
     to its projection_images.h5 (and as an OME-TIFF), e.g. for runs whose other projections
     were computed before the median was added. The median is exact (over every volume) for
     runs under MEDIAN_MAX_VOLUMES volumes, and approximate (over MEDIAN_SAMPLES evenly spaced
-    volumes) for longer ones; those volumes are kept in RAM if they fit, else in a temporary
-    memmap on the local disk (see _MedianStack)
+    volumes) for longer ones; those raw volumes are kept in RAM if they fit (at most
+    MEDIAN_MAX_RAM_BYTES), else the median is computed one x-section (range of planes) at a
+    time, with one pass per section (see _median_sections; from a .ozx, a pass only reads its
+    section's planes), so it stays exact
 combine_sample_projections: combine projection images and activity traces from several
     runs of the same sample and save them (as h5, OME-TIFFs, and a combined activity PNG
     with dotted lines marking run boundaries) to a new sample#_combined folder, recording
@@ -60,15 +74,17 @@ _plot_activity: plot an activity trace (mean fluorescence per volume) over time 
     it as a PNG, optionally marking run boundaries with vertical dotted lines
 """
 
+
 import os
-import shutil
-import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 import nrrd
 import numpy as np
 import psutil
 import scapeio
+import scapeio.operations
 import tifffile
+from scapeio.ozx import OzxArray
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
@@ -84,10 +100,14 @@ MAIN_PATH = str(SCAPE_PATH)
 ANALYSIS_PATH_NAME = "analysis"
 PROJECTION_FILE_NAME = "projection_images.h5"
 AUTO_BATCH_VOXELS = 1.4e9 # raw voxels loaded per batch by get_auto_batch_size
-MEDIAN_RAM_FRACTION = 0.5 # median stack kept in RAM if under this fraction of available RAM
+MEDIAN_MAX_RAM_BYTES = 8e9 # median stack held in RAM at once; bigger: split in x-sections
+MEDIAN_RAM_FRACTION = 0.5 # ... and at most this fraction of the available RAM
 MEDIAN_SLAB_BYTES = 1e9   # bytes of the median stack processed at a time
 MEDIAN_MAX_VOLUMES = 75   # runs with fewer volumes get the exact median over all volumes
 MEDIAN_SAMPLES = 50       # longer runs: approximate median from this many evenly spaced volumes
+TUBE_LENS = '50 mm Navitar' # always!
+STATS_THREADS = max(1, (os.cpu_count() or 4) - 2) # threads for the per-voxel reductions
+CROP_ROWS = 2             # camera rows cropped at each edge of z' (as scapeio.load_scan does)
 
 
 def load_napari_rois(roi_path: str | Path) -> np.ndarray:
@@ -164,7 +184,9 @@ def check_folder_structure(scape_path: str | Path):
     from the parent folder (as acquired) or up from the subfolder (where
     an older version of this function wrongly put them), and by creating
     the subfolder and moving the raw data into it. Raises errors if the
-    structure is not correct and cannot be fixed.
+    structure is not correct and cannot be fixed. A run converted to
+    `sample#_run#/sample#_run#.ozx` (see `get_ozx_path`) needs no
+    `_info.mat`, which is inside the `.ozx`.
 
     Parameters
     ----------
@@ -203,7 +225,8 @@ def check_folder_structure(scape_path: str | Path):
                 (other_path / file_name).rename(scape_path / file_name)
                 break
         else:
-            if file_suffix == '_info.mat':
+            # a run converted to .ozx has its _info.mat inside the .ozx
+            if file_suffix == '_info.mat' and get_ozx_path(scape_path) is None:
                 raise FileNotFoundError(f"Info file {file_name} not found in {scape_path}, its parent "
                                         f"folder, or {scape_raw_path}. Please check the folder structure.")
 
@@ -219,6 +242,164 @@ def check_folder_structure(scape_path: str | Path):
             raw_file.rename(scape_raw_path / raw_file.name)
         n_dat = sum(p.suffix == '.dat' for p in raw_files)
         print(f"Files moved successfully ({n_dat} .dat files and {len(raw_files) - n_dat} other files moved).")
+
+
+def get_ozx_path(scape_path: str | Path) -> Path | None:
+    """
+    Get the `.ozx` archive of a run (`sample#_run#/sample#_run#.ozx`, as written by
+    `scapeio convert <raw folder> -o <sample#_run# folder>`), if it has one.
+
+    Parameters
+    ----------
+    scape_path : str | Path
+        Path to a single `sample#_run#` folder.
+
+    Returns
+    -------
+    Path or None
+        Path to the `.ozx` file, or None if there is none.
+    """
+    scape_path = Path(scape_path)
+    ozx_path = scape_path / f'{scape_path.name}.ozx'
+    return ozx_path if ozx_path.is_file() else None
+
+
+def _swap_deskewed_axes(images: np.ndarray) -> np.ndarray:
+    """
+    Reorder the spatial axes of volumes deskewed by `scapeio.operations.deskew_array`
+    to (depth, galvo scan axis, camera image width), as `scapeio.operations.deskew_scan`
+    does.
+    """
+    if images.ndim == 3:
+        return images.swapaxes(0, 1)
+    if images.ndim == 4:
+        return images.swapaxes(1, 2)
+    raise ValueError(f'Data has an unexpected shape: {images.shape}')
+
+
+class RawRecording:
+    """
+    The raw volumes and metadata of a single `sample#_run#` recording, read from its
+    `.ozx` archive if it has one (see `get_ozx_path`), else from its .dat files with
+    scapeio.
+
+    A `.ozx` is read with `scapeio.ozx.OzxArray`, which reads only the volumes asked for
+    and decodes them in parallel, and holds all the metadata (so the run's `_info.mat`
+    etc. are not needed). Its volumes are the .dat volumes with `CROP_ROWS` camera rows
+    cropped at each edge (as `scapeio.load_scan` does) and without the 2 flyback frames
+    of each volume: `.ozx` plane `p` is .dat plane `p + 1`, and a `.ozx` volume has 2
+    planes fewer (along x, the galvo scan axis). Both are deskewed with the same
+    `scapeio.operations.deskew_array`.
+
+    Attributes
+    ----------
+    name : str
+        Name of the run.
+    ozx_path : Path or None
+        The run's `.ozx`, or None if read from .dat files.
+    num_volumes : int
+        Number of volumes.
+    scan_rate : float
+        Volumes per second.
+    volume_shape : tuple[int, int, int]
+        Shape (x, z', y) of a raw volume from `load`.
+    voxels_per_volume : int
+        Raw voxels per volume, for `get_auto_batch_size`.
+    voxel_size : dict
+        `.ozx` only: deskewed voxel size in micrometers (keys 'z', 'x', 'y'; for .dat
+        files see `load_voxel_size`).
+    """
+
+    def __init__(self, scape_path: str | Path):
+        """
+        Parameters
+        ----------
+        scape_path : str | Path
+            Path to a single `sample#_run#` folder (folder structure already checked).
+        """
+        scape_path = Path(scape_path)
+        self.name = scape_path.name
+        self._raw_path = str(scape_path / scape_path.name)  # string needed for scapeio
+        self.ozx_path = get_ozx_path(scape_path)
+        if self.ozx_path is not None:
+            self._ozx = OzxArray(self.ozx_path)
+            meta = self._ozx.attrs['scape']
+            if self._ozx.ndim != 4:
+                raise ValueError(f'{self.ozx_path} is not a single-color recording '
+                                 f'(shape {self._ozx.shape}).')
+            if meta['calibration']['tube_lens'] != TUBE_LENS:
+                raise ValueError(f"{self.ozx_path} was converted for the "
+                                 f"{meta['calibration']['tube_lens']} tube lens, not {TUBE_LENS}.")
+            pixel_size = meta['calibration']['pixel_size_um']
+            dx = round(meta['scan']['dx_um'], 6)  # galvo step, from the recorded waveform
+            self._raw_voxel_size = (dx, pixel_size["z'"], pixel_size['y'])  # (x, z', y)
+            self._sheet_angle = meta['calibration']['light_sheet_angle_from_vertical_deg']
+            self.num_volumes = self._ozx.shape[0]
+            self.scan_rate = 1 / meta['scan']['volume_period_s']
+            _, n_x, n_z, n_y = self._ozx.shape
+            self.volume_shape = (n_x, n_z - 2 * CROP_ROWS, n_y)
+            self.voxels_per_volume = int(np.prod(self.volume_shape))
+            self.voxel_size = {'z': pixel_size['z'], 'x': dx, 'y': pixel_size['y']}
+        else:
+            _, self.num_volumes, self.scan_rate = scapeio.get_scan_timing(self._raw_path)
+            scan_name = scapeio.get_scan_name(self._raw_path)
+            daq_metadata = scapeio.load_matlab_metadata(scan_name)['daq']
+            camera_metadata = scapeio.load_camera_metadata(scan_name)['data']
+            self.volume_shape = (int(daq_metadata['pixelsPerLine']),
+                                 int(camera_metadata['aoiheight']) - 2 * CROP_ROWS,
+                                 int(camera_metadata['aoiwidth']))
+            self.voxels_per_volume = int(np.prod(self.volume_shape))
+
+    def load(self,
+             start_volume: int,
+             end_volume: int,
+             x_range: tuple[int, int] | None = None) -> np.ndarray:
+        """
+        Load the raw volumes `start_volume` to `end_volume` (exclusive).
+
+        Parameters
+        ----------
+        start_volume, end_volume : int
+            The volumes to load (`end_volume` exclusive).
+        x_range : tuple[int, int] | None
+            Only load the planes `x_range[0]` to `x_range[1]` (exclusive) of each volume.
+            From a `.ozx`, only those planes are read; from .dat files, the whole volumes
+            are read and then cropped. Default None (all planes).
+
+        Returns
+        -------
+        np.ndarray
+            uint16 volumes (time, x, z', y), always with a time axis.
+        """
+        x_slice = slice(*x_range) if x_range is not None else slice(None)
+        if self.ozx_path is not None:
+            return self._ozx[start_volume:end_volume, x_slice][:, :, CROP_ROWS:-CROP_ROWS]
+        video, axis_order = scapeio.load_scan(self._raw_path, colors=1,
+                                              start_volume=start_volume,
+                                              end_volume=end_volume,
+                                              demotioned=False, try_loading_copies=None,
+                                              return_axis_order=True)
+        if 't' not in axis_order:
+            # scapeio drops the time axis when loading a single volume; restore it
+            video = video[np.newaxis]
+        return video[:, x_slice]
+
+    def deskew(self, video: np.ndarray) -> np.ndarray:
+        """
+        Deskew raw volumes from `load`, or a raw projection (x, z', y), as
+        `scapeio.operations.deskew_scan` does.
+
+        Returns
+        -------
+        np.ndarray
+            Deskewed volumes (time, z, x, y), or projection (z, x, y).
+        """
+        if self.ozx_path is None:
+            return scapeio.operations.deskew_scan(self._raw_path, TUBE_LENS, images=video)
+        deskewed = scapeio.operations.deskew_array(video, self._raw_voxel_size,
+                                                   sheet_angle_degrees=self._sheet_angle)
+        return _swap_deskewed_axes(deskewed)
+
 
 def load_voxel_size(scape_path: str | Path) -> dict:
     """
@@ -256,10 +437,11 @@ def load_voxel_size(scape_path: str | Path) -> dict:
                 'x': float(pixels.attrib['PhysicalSizeX']),
                 'y': float(pixels.attrib['PhysicalSizeY'])}
 
-    scape_raw_path = scape_path / scape_path.name
+    if get_ozx_path(scape_path) is not None:
+        return RawRecording(scape_path).voxel_size
 
-    tube_lens = '50 mm Navitar' #always!
-    voxel_size = scapeio.get_voxel_size(scape_raw_path, tube_lens, deskewed=True)
+    scape_raw_path = scape_path / scape_path.name
+    voxel_size = scapeio.get_voxel_size(scape_raw_path, TUBE_LENS, deskewed=True)
     axes = {'z':0, 'x':1, 'y':2}
     voxel_size = {ax:voxel_size[axes[ax]] for ax in axes.keys()}
     return voxel_size
@@ -331,7 +513,7 @@ def get_auto_batch_size(scape_path: str | Path) -> int:
 
     Memory per batch scales with the number of raw voxels per volume
     (planes per volume x image height x image width, from the recording's
-    metadata), so the batch size is `AUTO_BATCH_VOXELS` divided by that,
+    metadata or `.ozx`, see `RawRecording`), so the batch size is `AUTO_BATCH_VOXELS` divided by that,
     rounded and clipped to between 1 and the number of volumes. The budget
     is calibrated on recordings that are known to work: batches of 50
     volumes of ~100 planes (~27 Mvoxels per volume) and batches of 7 volumes
@@ -349,16 +531,10 @@ def get_auto_batch_size(scape_path: str | Path) -> int:
         Number of volumes to load per batch.
     """
     scape_path = Path(scape_path)
-    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio
-    scan_name = scapeio.get_scan_name(scape_raw_path)
-    daq_metadata = scapeio.load_matlab_metadata(scan_name)['daq']
-    camera_metadata = scapeio.load_camera_metadata(scan_name)['data']
-    num_volumes = int(daq_metadata['numberOfScans'])
-    voxels_per_volume = (int(daq_metadata['pixelsPerLine'])
-                         * int(camera_metadata['aoiheight'])
-                         * int(camera_metadata['aoiwidth']))
+    recording = RawRecording(scape_path)
+    voxels_per_volume = recording.voxels_per_volume
     batch_size = int(round(AUTO_BATCH_VOXELS / voxels_per_volume))
-    batch_size = max(1, min(batch_size, num_volumes))
+    batch_size = max(1, min(batch_size, recording.num_volumes))
     print(f'Auto batch size for {scape_path.name}: {batch_size} volumes '
           f'({voxels_per_volume / 1e6:.0f} Mvoxels per volume)')
     return batch_size
@@ -376,79 +552,147 @@ def _tiff_metadata(voxel_size: dict) -> dict:
             'PhysicalSizeZ': voxel_size['z'], 'PhysicalSizeZUnit': 'um'}
 
 
-def _deskewed_batches(scape_path: Path,
-                      batch_size: int | None,
-                      desc: str):
+def _volume_ranges(volume_indices: np.ndarray,
+                   batch_size: int) -> list[tuple[int, int]]:
     """
-    Load and deskew the volumes of a recording, a batch at a time.
+    Group sorted volume indices into ranges `(start, stop)` (stop exclusive) of
+    consecutive volumes, each at most `batch_size` long (one per volume for
+    indices that are not consecutive, e.g. the evenly spaced volumes of an
+    approximate median).
+    """
+    ranges = []
+    start = prev = int(volume_indices[0])
+    for volume in volume_indices[1:]:
+        volume = int(volume)
+        if volume != prev + 1 or volume - start >= batch_size:
+            ranges.append((start, prev + 1))
+            start = volume
+        prev = volume
+    ranges.append((start, prev + 1))
+    return ranges
+
+
+def _raw_batches(recording: RawRecording,
+                 ranges: list[tuple[int, int]],
+                 desc: str,
+                 x_range: tuple[int, int] | None = None):
+    """
+    Load raw batches of volumes (see `RawRecording.load`), loading the next
+    batch in a background thread while the current one is being processed.
 
     Parameters
     ----------
-    scape_path : Path
-        A single `sample#_run#` folder (folder structure already checked).
-    batch_size : int | None
-        Number of volumes per batch; None: see `get_auto_batch_size`.
+    recording : RawRecording
+        The recording.
+    ranges : list[tuple[int, int]]
+        The `(start, stop)` volumes of each batch (stop exclusive).
     desc : str
         Description of the progress bar.
+    x_range : tuple[int, int] | None
+        Only load these planes of each volume (see `RawRecording.load`).
 
     Yields
     ------
     tuple[int, np.ndarray]
-        Index of the first volume of the batch, and the deskewed batch
-        (time, z, x, y), as returned by scapeio (uint16). A batch of a single
-        volume, which scapeio returns without a time axis, gets it back.
+        First volume of the batch, and the raw batch (time, x, z', y) (uint16).
     """
-    if batch_size is None:
-        batch_size = get_auto_batch_size(scape_path)
-    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio.load_scan
-    _, num_volumes, _ = scapeio.get_scan_timing(scape_raw_path)
-    for start_volume in tqdm.tqdm(range(0, num_volumes, batch_size), desc=desc):
-        end_volume = min(start_volume + batch_size, num_volumes)
-        print(f'Loading volumes {start_volume} to {end_volume}...')
-        video_batch, axis_order = scapeio.load_scan(scape_raw_path, colors=1,
-                                                    start_volume=start_volume,
-                                                    end_volume=end_volume - 1,
-                                                    return_axis_order=True)
-        if 't' not in axis_order:
-            # scapeio drops the time axis when a batch holds a single volume (e.g. a
-            # last batch of 1 volume); restore it so axis 0 is always time
-            video_batch = video_batch[np.newaxis]
-        deskewed_batch = scapeio.operations.deskew_scan(scape_raw_path, images=video_batch)
-        del video_batch
-        yield start_volume, deskewed_batch
+    source = recording.ozx_path.name if recording.ozx_path is not None else '.dat files'
+    print(f'Reading {recording.name} from {source}')
+    with ThreadPoolExecutor(max_workers=1) as prefetch:
+        future = prefetch.submit(recording.load, *ranges[0], x_range)
+        for i, (start, _) in enumerate(tqdm.tqdm(ranges, desc=desc)):
+            batch = future.result()
+            if i + 1 < len(ranges):
+                future = prefetch.submit(recording.load, *ranges[i + 1], x_range)
+            yield start, batch
+            del batch
 
 
-def _deskewed_volumes(scape_path: Path,
-                      volume_indices: np.ndarray,
-                      desc: str):
+def _x_slabs(n_x: int) -> list[slice]:
     """
-    Load and deskew only some volumes of a recording, one at a time.
-
-    Parameters
-    ----------
-    scape_path : Path
-        A single `sample#_run#` folder (folder structure already checked).
-    volume_indices : np.ndarray
-        Indices of the volumes to load.
-    desc : str
-        Description of the progress bar.
-
-    Yields
-    ------
-    tuple[int, np.ndarray]
-        Index of the volume, and the deskewed volume with a time axis of
-        length 1 (1, z, x, y), like `_deskewed_batches`.
+    Split `n_x` planes into one slab per stats thread (see `STATS_THREADS`).
     """
-    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio.load_scan
-    for volume in tqdm.tqdm(volume_indices, desc=desc):
-        video, axis_order = scapeio.load_scan(scape_raw_path, colors=1,
-                                              start_volume=int(volume), end_volume=int(volume),
-                                              return_axis_order=True)
-        if 't' not in axis_order:
-            video = video[np.newaxis]
-        deskewed = scapeio.operations.deskew_scan(scape_raw_path, images=video)
-        del video
-        yield int(volume), deskewed
+    bounds = np.linspace(0, n_x, min(n_x, STATS_THREADS) + 1).round().astype(int)
+    return [slice(int(a), int(b)) for a, b in zip(bounds[:-1], bounds[1:])]
+
+
+class _RawProjections:
+    """
+    Max, min, sum and sum of squares over time of every raw voxel, and the
+    activity trace (mean of the nonzero voxels of each volume), accumulated
+    batch by batch from the raw uint16 volumes, without converting them to
+    float. Max and min stay uint16, and the sums are uint64, which are exact
+    and can't overflow (wrap around): a voxel's square is at most 65535^2 ~ 4.3e9,
+    and uint64 holds up to ~1.8e19. Each batch is processed in one pass, split
+    along x over `STATS_THREADS` threads (numpy releases the GIL).
+    """
+
+    def __init__(self, volume_shape: tuple):
+        """
+        Parameters
+        ----------
+        volume_shape : tuple
+            Shape (x, z', y) of a raw volume.
+        """
+        self.max_proj = np.zeros(volume_shape, np.uint16)
+        self.min_proj = np.full(volume_shape, np.iinfo(np.uint16).max, np.uint16)
+        self.sum_x = np.zeros(volume_shape, np.uint64)
+        self.sum_x2 = np.zeros(volume_shape, np.uint64)
+        self.frame_count = 0
+        self._activity = []
+        self._slabs = _x_slabs(volume_shape[0])
+        self._pool = ThreadPoolExecutor(max_workers=len(self._slabs))
+
+    def _add_slab(self,
+                  batch: np.ndarray,
+                  x: slice) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Accumulate the planes `x` of a batch; return each volume's sum and nonzero
+        count over these planes.
+        """
+        slab = batch[:, x]
+        np.maximum(self.max_proj[x], slab.max(axis=0), out=self.max_proj[x])
+        np.minimum(self.min_proj[x], slab.min(axis=0), out=self.min_proj[x])
+        np.add(self.sum_x[x], slab.sum(axis=0, dtype=np.uint64), out=self.sum_x[x])
+        for volume in slab:
+            square = volume.astype(np.uint32)
+            square *= square
+            np.add(self.sum_x2[x], square, out=self.sum_x2[x])
+        spatial_axes = tuple(range(1, slab.ndim))
+        return (slab.sum(axis=spatial_axes, dtype=np.uint64),
+                np.count_nonzero(slab, axis=spatial_axes))
+
+    def add(self, batch: np.ndarray) -> None:
+        """
+        Accumulate a raw batch (time, x, z', y) (uint16).
+        """
+        results = list(self._pool.map(lambda x: self._add_slab(batch, x), self._slabs))
+        volume_sums = np.sum([r[0] for r in results], axis=0)
+        nonzero_counts = np.sum([r[1] for r in results], axis=0)
+        # per-volume mean fluorescence, ignoring zero voxels as if they were nan
+        with np.errstate(invalid='ignore'):
+            self._activity.append(volume_sums / nonzero_counts)
+        self.frame_count += batch.shape[0]
+
+    def std_image(self) -> np.ndarray:
+        """
+        Std over time of every raw voxel (float64).
+        """
+        mean = self.sum_x / self.frame_count
+        mean_sq = self.sum_x2 / self.frame_count
+        return np.sqrt(np.maximum(0, mean_sq - np.square(mean)))
+
+    def activity(self) -> np.ndarray:
+        """
+        The activity trace (mean of the nonzero voxels of each volume).
+        """
+        return np.concatenate(self._activity)
+
+    def close(self) -> None:
+        """
+        Stop the threads.
+        """
+        self._pool.shutdown()
 
 
 def _median_volume_indices(num_volumes: int) -> np.ndarray:
@@ -463,86 +707,158 @@ def _median_volume_indices(num_volumes: int) -> np.ndarray:
     return np.unique(np.linspace(0, num_volumes - 1, MEDIAN_SAMPLES).round().astype(int))
 
 
+def _median_sections(num_volumes: int,
+                     volume_shape: tuple,
+                     name: str) -> list[tuple[int, int]]:
+    """
+    Split the raw stack the median is taken over (`num_volumes` raw uint16
+    volumes) into x-sections (ranges of planes) that each fit in RAM: at most
+    `MEDIAN_MAX_RAM_BYTES`, and at most `MEDIAN_RAM_FRACTION` of the currently
+    available RAM. The first section is filled during the pass that computes
+    the other projections, and each further one takes one more pass (see
+    `_median_by_sections`), which from a `.ozx` only reads that section's
+    planes.
+
+    Parameters
+    ----------
+    num_volumes : int
+        Number of volumes the median is taken over.
+    volume_shape : tuple
+        Shape (x, z', y) of one raw volume.
+    name : str
+        Name of the recording (for messages).
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        (start, stop) x-index of each section.
+    """
+    n_x = volume_shape[0]
+    nbytes = num_volumes * int(np.prod(volume_shape)) * np.dtype(np.uint16).itemsize
+    budget = min(MEDIAN_MAX_RAM_BYTES, MEDIAN_RAM_FRACTION * psutil.virtual_memory().available)
+    num_sections = min(n_x, max(1, int(np.ceil(nbytes / budget))))
+    bounds = np.linspace(0, n_x, num_sections + 1).round().astype(int)
+    if num_sections == 1:
+        print(f'Median of {name}: keeping the {nbytes / 1e9:.1f} GB stack in RAM.')
+    else:
+        print(f'Median of {name}: the {nbytes / 1e9:.1f} GB stack is split into '
+              f'{num_sections} x-sections of {nbytes / num_sections / 1e9:.1f} GB.')
+    return [(int(start), int(stop)) for start, stop in zip(bounds[:-1], bounds[1:])]
+
+
 class _MedianStack:
     """
-    The deskewed volumes of a recording that the median is taken over (all,
-    or a subsample, see `_median_volume_indices`), filled batch by batch, to
-    take their median over time voxel by voxel. Kept in RAM if the stack takes less
-    than `MEDIAN_RAM_FRACTION` of the available RAM, else in a temporary
-    memmap on the local disk (in `tempfile.gettempdir()`, deleted by `close`).
-    The median is then taken one slab along z at a time (`MEDIAN_SLAB_BYTES`).
+    One x-section (see `_median_sections`) of the raw volumes of a recording
+    that the median is taken over (all, or a subsample, see
+    `_median_volume_indices`), filled batch by batch and kept in RAM, to take
+    their median over time voxel by voxel, a slab along x at a time
+    (`MEDIAN_SLAB_BYTES`, on `STATS_THREADS` threads), to limit the memory of
+    `np.median`.
     """
 
     def __init__(self,
                  volume_indices: np.ndarray,
                  volume_shape: tuple,
-                 dtype: np.dtype,
-                 name: str):
+                 x_start: int,
+                 x_stop: int):
         """
         Parameters
         ----------
         volume_indices : np.ndarray
             Sorted indices (in the recording) of the volumes to keep.
         volume_shape : tuple
-            Shape of one deskewed volume (z, x, y).
-        dtype : np.dtype
-            Data type of the deskewed volumes.
-        name : str
-            Name of the recording (for messages and the memmap file name).
+            Shape (x, z', y) of one raw volume.
+        x_start, x_stop : int
+            The x-section of the volumes to keep.
         """
         self.volume_indices = np.asarray(volume_indices)
-        shape = (len(self.volume_indices), *volume_shape)
-        nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
-        available_ram = psutil.virtual_memory().available
-        self.path = None
-        if nbytes < MEDIAN_RAM_FRACTION * available_ram:
-            print(f'Median of {name}: keeping the {nbytes / 1e9:.1f} GB stack in RAM.')
-            self.stack = np.empty(shape, dtype)
-            return
-        temp_dir = tempfile.gettempdir()
-        free_disk = shutil.disk_usage(temp_dir).free
-        if nbytes > 0.95 * free_disk:
-            raise MemoryError(f'Median of {name}: the {nbytes / 1e9:.1f} GB stack fits neither '
-                              f'in RAM ({available_ram / 1e9:.1f} GB available) nor on the '
-                              f'local disk ({free_disk / 1e9:.1f} GB free in {temp_dir}).')
-        handle, path = tempfile.mkstemp(prefix=f'median_{name}_', suffix='.dat')
-        os.close(handle)
-        self.path = Path(path)
-        print(f'Median of {name}: the {nbytes / 1e9:.1f} GB stack does not fit in RAM, '
-              f'using a temporary memmap ({self.path}).')
-        self.stack = np.memmap(self.path, dtype=dtype, mode='w+', shape=shape)
+        self.x_start, self.x_stop = x_start, x_stop
+        self.stack = np.empty((len(self.volume_indices), x_stop - x_start, *volume_shape[1:]),
+                              np.uint16)
 
     def add(self,
             start_volume: int,
-            batch: np.ndarray) -> None:
+            batch: np.ndarray,
+            batch_x_start: int = 0) -> None:
         """
-        Store the volumes to keep of a batch of deskewed volumes (time first)
-        starting at volume `start_volume`.
+        Store the x-section of the volumes to keep of a raw batch (time, x, z', y)
+        starting at volume `start_volume`, whose planes start at `batch_x_start`
+        (0 for whole volumes; `x_start` for a batch of just this section).
         """
         lo, hi = np.searchsorted(self.volume_indices, [start_volume, start_volume + batch.shape[0]])
         if hi > lo:
-            self.stack[lo:hi] = batch[self.volume_indices[lo:hi] - start_volume]
+            x = slice(self.x_start - batch_x_start, self.x_stop - batch_x_start)
+            self.stack[lo:hi] = batch[self.volume_indices[lo:hi] - start_volume, x]
 
     def median(self) -> np.ndarray:
         """
-        Median over time of every voxel (float32; for an even number of
-        volumes, the mean of the two middle values).
+        Median over time of every voxel of the section (float32; for an even
+        number of volumes, the mean of the two middle values).
         """
-        num_volumes, depth = self.stack.shape[:2]
-        slab_bytes = num_volumes * int(np.prod(self.stack.shape[2:])) * self.stack.itemsize
-        slab = max(1, int(MEDIAN_SLAB_BYTES // slab_bytes))
+        num_volumes, n_x = self.stack.shape[:2]
+        plane_bytes = num_volumes * int(np.prod(self.stack.shape[2:])) * self.stack.itemsize
+        slab = max(1, int(MEDIAN_SLAB_BYTES // plane_bytes))
         median = np.empty(self.stack.shape[1:], np.float32)
-        for z in tqdm.tqdm(range(0, depth, slab), desc='Median over time'):
-            median[z:z + slab] = np.median(np.asarray(self.stack[:, z:z + slab]), axis=0)
+
+        def median_slab(x):
+            median[x:x + slab] = np.median(self.stack[:, x:x + slab], axis=0)
+
+        with ThreadPoolExecutor(max_workers=STATS_THREADS) as pool:
+            list(tqdm.tqdm(pool.map(median_slab, range(0, n_x, slab)),
+                           total=len(range(0, n_x, slab)), desc='Median over time'))
         return median
 
     def close(self) -> None:
         """
-        Free the stack and delete the memmap file, if any.
+        Free the stack.
         """
         del self.stack
-        if self.path is not None:
-            self.path.unlink(missing_ok=True)
+
+
+def _median_by_sections(recording: RawRecording,
+                        batch_size: int,
+                        volume_indices: np.ndarray,
+                        sections: list[tuple[int, int]],
+                        median_proj: np.ndarray) -> None:
+    """
+    Fill in the raw median projection one x-section at a time, one pass over the
+    volumes `volume_indices` per section, loading only the section's planes
+    (from a `.ozx`; .dat files are read whole and cropped).
+
+    Parameters
+    ----------
+    recording : RawRecording
+        The recording.
+    batch_size : int
+        Number of volumes per batch.
+    volume_indices : np.ndarray
+        Sorted indices of the volumes the median is taken over.
+    sections : list[tuple[int, int]]
+        The x-sections to compute (see `_median_sections`).
+    median_proj : np.ndarray
+        Raw median projection (x, z', y) (float32), filled in place.
+    """
+    ranges = _volume_ranges(volume_indices, batch_size)
+    for i, (x_start, x_stop) in enumerate(sections):
+        median_stack = _MedianStack(volume_indices, recording.volume_shape, x_start, x_stop)
+        try:
+            desc = f'Median x-section {i + 1}/{len(sections)} ({recording.name})'
+            for start_volume, batch in _raw_batches(recording, ranges, desc,
+                                                    x_range=(x_start, x_stop)):
+                median_stack.add(start_volume, batch, batch_x_start=x_start)
+            median_proj[x_start:x_stop] = median_stack.median()
+        finally:
+            median_stack.close()
+
+
+def _deskew_projection(recording: RawRecording,
+                       projection: np.ndarray,
+                       dtype: type = np.float32) -> np.ndarray:
+    """
+    Deskew a raw projection (x, z', y) to (z, x, y) (see `RawRecording.deskew`), in
+    float64 so the deskew's interpolation isn't rounded, and return it as `dtype`.
+    """
+    return recording.deskew(projection.astype(np.float64)).astype(dtype)
 
 
 def _save_median(analysis_path: Path,
@@ -550,9 +866,9 @@ def _save_median(analysis_path: Path,
                  voxel_size: dict,
                  n_volumes: int) -> None:
     """
-    Save the median projection in the analysis folder's projection_images.h5
-    (`median_proj`, with the number of volumes it was taken over as its
-    `n_volumes` attribute) and as `median_proj.ome.tif`.
+    Save the (deskewed) median projection in the analysis folder's
+    projection_images.h5 (`median_proj`, with the number of volumes it was taken
+    over as its `n_volumes` attribute) and as `median_proj.ome.tif`.
     """
     with h5py.File(analysis_path / PROJECTION_FILE_NAME, 'a') as f:
         if 'median_proj' in f:
@@ -584,6 +900,15 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
     saved too (`median_proj`: exact for runs under `MEDIAN_MAX_VOLUMES` volumes,
     else from `MEDIAN_SAMPLES` evenly spaced volumes, see `get_median_projection`).
 
+    Everything is computed on the raw (not deskewed) volumes, read from the run's
+    `.ozx` or .dat files (see `RawRecording`), which is more accurate than on
+    deskewed ones (the deskew interpolates between planes), and much faster:
+    only the final projections are deskewed (in float, see `_deskew_projection`),
+    instead of every volume. The raw uint16 data is never converted to float:
+    max/min stay uint16 and the sums are exact uint64 (see `_RawProjections`).
+    The activity is the mean of each raw volume's nonzero voxels. The saved
+    `sum_x`/`sum_x2` are deskewed (float64), for `combine_sample_projections`.
+
     Parameters
     ----------
     scape_path : str | Path
@@ -594,18 +919,16 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
     batch_size : int | None
         Number of volumes to load per batch. If None (default), chosen
         automatically from the volume size (see `get_auto_batch_size`).
-        A last batch holding a single
-        volume is handled correctly (scapeio returns it without a time axis,
-        which is re-added here).
     activity_path : str | Path | None
         Where to save the activity plot. If None (default), `activity.png` in
         the analysis folder.
     median : bool
         Also compute the median projection, which needs the volumes it is taken
         over (all of them for short runs, `MEDIAN_SAMPLES` for longer ones) at
-        once (in RAM, or a temporary memmap on the local disk, see
-        `_MedianStack`). If there is room for neither, the median is skipped
-        with a warning. Default False.
+        at once. Its first x-section is filled in this pass; if the stack is
+        too big for RAM (see `_median_sections`), each further x-section takes
+        one more pass, which from a `.ozx` only reads that section's planes.
+        Default False.
     plot_activity : bool
         Save the activity plot. Default True.
     """
@@ -618,73 +941,57 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
     analysis_path = scape_path / ANALYSIS_PATH_NAME
     h5_path = analysis_path / PROJECTION_FILE_NAME
 
-    sum_x: np.ndarray | None = None
-    sum_x2: np.ndarray | None = None
-    min_proj: np.ndarray | None = None
-    max_proj: np.ndarray | None = None
+    if batch_size is None:
+        batch_size = get_auto_batch_size(scape_path)
+    recording = RawRecording(scape_path)
+    num_volumes, scan_rate = recording.num_volumes, recording.scan_rate
+    median_volume_indices = _median_volume_indices(num_volumes)
+    median_sections: list[tuple[int, int]] = []
     median_stack: _MedianStack | None = None
-    frame_count = 0
-    activity_batches = []
+    median_proj: np.ndarray | None = None
+    if median:
+        # this pass also fills the median's first x-section; any others take one
+        # more pass each, below
+        median_sections = _median_sections(len(median_volume_indices), recording.volume_shape,
+                                           scape_path.name)
+        median_proj = np.empty(recording.volume_shape, np.float32)
+        median_stack = _MedianStack(median_volume_indices, recording.volume_shape,
+                                    *median_sections[0])
 
-    scape_raw_path = str(scape_path / scape_path.name) # string needed for scapeio
-    _, num_volumes, scan_rate = scapeio.get_scan_timing(scape_raw_path)
-
+    projections = _RawProjections(recording.volume_shape)
+    ranges = [(start, min(start + batch_size, num_volumes))
+              for start in range(0, num_volumes, batch_size)]
     try:
-        for start_volume, deskewed_batch in _deskewed_batches(
-                scape_path, batch_size, f'Computing projection images ({scape_path.name})'):
-            if median and median_stack is None:
-                try:
-                    median_stack = _MedianStack(_median_volume_indices(num_volumes),
-                                                deskewed_batch.shape[1:],
-                                                deskewed_batch.dtype, scape_path.name)
-                except MemoryError as error:
-                    print(f'Warning: {error} Skipping the median projection.')
-                    median = False
-            if median:
-                median_stack.add(start_volume, deskewed_batch)
-            deskewed_batch = deskewed_batch.astype(np.float32)
-
-            if max_proj is None:
-                max_proj = np.max(deskewed_batch, axis=0)
-            else:
-                max_proj = np.maximum(max_proj, np.max(deskewed_batch, axis=0))
-
-            if min_proj is None:
-                min_proj = np.min(deskewed_batch, axis=0)
-            else:
-                min_proj = np.minimum(min_proj, np.min(deskewed_batch, axis=0))
-
-            if sum_x is None:
-                sum_x = np.sum(deskewed_batch, axis=0)
-                sum_x2 = np.sum(deskewed_batch ** 2, axis=0)
-            else:
-                sum_x += np.sum(deskewed_batch, axis=0)
-                sum_x2 += np.sum(deskewed_batch ** 2, axis=0)
-            frame_count += deskewed_batch.shape[0]
-
-            # per-volume mean fluorescence, ignoring zero voxels as if they were nan
-            # (zeros don't contribute to the sum, so only the nonzero count matters)
-            spatial_axes = tuple(range(1, deskewed_batch.ndim))
-            nonzero_sum = np.sum(deskewed_batch, axis=spatial_axes)
-            nonzero_count = np.count_nonzero(deskewed_batch, axis=spatial_axes)
-            with np.errstate(invalid='ignore'):
-                activity_batches.append(nonzero_sum / nonzero_count)
-
-            del deskewed_batch
-
-        median_proj = median_stack.median() if median_stack is not None else None
+        for start_volume, batch in _raw_batches(
+                recording, ranges, f'Computing projection images ({scape_path.name})'):
+            if batch.shape[1:] != recording.volume_shape:
+                raise ValueError(f'Volumes of {scape_path.name} have shape {batch.shape[1:]}, '
+                                 f'not {recording.volume_shape} as expected from its metadata.')
+            if median_stack is not None:
+                median_stack.add(start_volume, batch)
+            projections.add(batch)
+        if median_stack is not None:
+            x_start, x_stop = median_sections[0]
+            median_proj[x_start:x_stop] = median_stack.median()
     finally:
+        projections.close()
         if median_stack is not None:
             median_stack.close()
+    if len(median_sections) > 1:
+        _median_by_sections(recording, batch_size, median_volume_indices,
+                            median_sections[1:], median_proj)
 
-    mean = sum_x / frame_count
-    mean_sq = sum_x2 / frame_count
-    variance = np.maximum(0, mean_sq - np.square(mean))
-    std_image = np.sqrt(variance)
-    activity = np.concatenate(activity_batches)
+    # deskew only the final projections
+    print(f'Deskewing the projections of {scape_path.name}...')
+    max_proj = _deskew_projection(recording, projections.max_proj)
+    min_proj = _deskew_projection(recording, projections.min_proj)
+    std_image = _deskew_projection(recording, projections.std_image())
+    sum_x = _deskew_projection(recording, projections.sum_x, np.float64)
+    sum_x2 = _deskew_projection(recording, projections.sum_x2, np.float64)
+    frame_count = projections.frame_count
+    activity = projections.activity()
 
     # SAVE the results
-    analysis_path = scape_path / "analysis"
     analysis_path.mkdir(exist_ok=True)
     voxel_size = load_voxel_size(scape_path)
 
@@ -711,8 +1018,8 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
         tifffile.imwrite(tiff_path, data.transpose(0, 2, 1), ome=True, metadata=tiff_metadata)
     print(f'Saved std_image, min_proj, max_proj as OME-TIFFs to {analysis_path}')
     if median_proj is not None:
-        _save_median(analysis_path, median_proj, voxel_size,
-                     len(_median_volume_indices(num_volumes)))
+        _save_median(analysis_path, _deskew_projection(recording, median_proj), voxel_size,
+                     len(median_volume_indices))
 
     # also plot and save the activity trace over time
     if plot_activity:
@@ -736,8 +1043,10 @@ def get_median_projection(scape_path: str | Path,
     Unlike the min/max/std, the median needs all the volumes it is taken over
     at once: every volume for runs under `MEDIAN_MAX_VOLUMES` volumes, else
     `MEDIAN_SAMPLES` evenly spaced volumes (an approximate median; only those
-    volumes are loaded, one at a time). They are kept in RAM if they fit, else
-    in a temporary memmap on the local disk (see `_MedianStack`).
+    volumes are loaded). It is taken over the raw volumes, which are kept in RAM if
+    they fit (see `_median_sections`), else one x-section at a time, with one pass
+    per section (still exact; from a `.ozx`, each pass reads only its section's
+    planes), and only the median is deskewed (see `_deskew_projection`).
 
     Parameters
     ----------
@@ -750,39 +1059,29 @@ def get_median_projection(scape_path: str | Path,
     Returns
     -------
     np.ndarray
-        The median projection (float32).
+        The (deskewed) median projection (float32).
     """
     scape_path = Path(scape_path)
     if is_combined_path(scape_path):
         raise ValueError(f'{scape_path} is a sample#_combined folder, which has no raw data '
                          f'of its own.')
     check_folder_structure(scape_path)
-    scape_raw_path = str(scape_path / scape_path.name)  # string needed for scapeio
-    _, num_volumes, _ = scapeio.get_scan_timing(scape_raw_path)
-    volume_indices = _median_volume_indices(num_volumes)
-    if len(volume_indices) == num_volumes:
-        batches = _deskewed_batches(scape_path, batch_size,
-                                    f'Computing median projection ({scape_path.name})')
-    else:
-        batches = _deskewed_volumes(scape_path, volume_indices,
-                                    f'Computing approximate median projection from '
-                                    f'{len(volume_indices)} volumes ({scape_path.name})')
-    median_stack = None
-    try:
-        for start_volume, deskewed_batch in batches:
-            if median_stack is None:
-                median_stack = _MedianStack(volume_indices, deskewed_batch.shape[1:],
-                                            deskewed_batch.dtype, scape_path.name)
-            median_stack.add(start_volume, deskewed_batch)
-            del deskewed_batch
-        median_proj = median_stack.median()
-    finally:
-        if median_stack is not None:
-            median_stack.close()
+    if batch_size is None:
+        batch_size = get_auto_batch_size(scape_path)
+    recording = RawRecording(scape_path)
+    volume_indices = _median_volume_indices(recording.num_volumes)
+    if len(volume_indices) < recording.num_volumes:
+        print(f'Approximate median projection of {scape_path.name} from '
+              f'{len(volume_indices)} volumes')
+    sections = _median_sections(len(volume_indices), recording.volume_shape, scape_path.name)
+    median_proj = np.empty(recording.volume_shape, np.float32)
+    _median_by_sections(recording, batch_size, volume_indices, sections, median_proj)
+    median_proj = _deskew_projection(recording, median_proj)
     analysis_path = scape_path / ANALYSIS_PATH_NAME
     analysis_path.mkdir(exist_ok=True)
     _save_median(analysis_path, median_proj, load_voxel_size(scape_path), len(volume_indices))
     return median_proj
+
 
 def _plot_activity(activity: np.ndarray, time_axis: np.ndarray, save_path: str | Path,
                    title: str, run_boundaries: list[float] | None = None):
@@ -889,7 +1188,8 @@ def combine_sample_projections(exp_folder: str | Path, sample_name: str, run_pat
             run_scan_rate = f.attrs['scan_rate']
 
         if sum_x is None:
-            sum_x, sum_x2 = run_sum_x, run_sum_x2
+            # float64, also when combining runs saved with float32 sums
+            sum_x, sum_x2 = run_sum_x.astype(np.float64), run_sum_x2.astype(np.float64)
             min_proj, max_proj = run_min_proj, run_max_proj
         else:
             sum_x += run_sum_x

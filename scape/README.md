@@ -1,23 +1,38 @@
 # scape
 
-Pipeline 2: preprocess 3D muscle videos recorded on SCAPE. Run with the conda environment
-`scapeio`.
+Pipeline 2: preprocess 3D muscle videos recorded on SCAPE. Run with the repository's uv
+environment (`uv run python ...`; Python 3.12 with scapeio's `ozx` extra, needed for `.ozx`
+files).
 
 Warning: in napari's default 3D view (depth axis `'towards'`, napari >= 0.6), the deskewed
 OME-TIFFs look left-right mirrored, although the data are not. Set napari's depth axis to
 `'away'`; see "Warning: napari 3D views can look mirrored" in the root `README.md`.
 
-- `transfer_scape_recordings.py`: runs on the SCAPE PC during acquisition, and moves each finished
-  recording to the server (so the SCAPE PC disk does not fill up). Each run is renamed on the SCAPE
+Raw data: a run is either thousands of `.dat` spool files (`sample#_run#/sample#_run#/`, with
+`_info.mat` and `_stim_data.bin` next to them) or a single lossless `.ozx` archive
+(`sample#_run#/sample#_run#.ozx`, ~2.5x smaller, made by `scapeio convert` from the `ozx`
+branch of scapeio, Python >= 3.12; see `docs/ozx.md` there). `scape_utils.RawRecording` reads
+either, preferring the `.ozx`, which is ~5x faster to read from the server. For runs with
+754-plane volumes, convert with `--shard-volumes 10` (the default of 400 volumes per shard
+makes ~70 GB shards). A `.ozx` volume has no flyback frames, so it has 2 planes fewer than the
+same volume from `.dat` files: recompute all projections of an experiment after converting it,
+so the runs of a sample can still be combined.
+
+- `transfer_scape_recordings.py`: runs during acquisition (on this machine, with the SCAPE PC
+  mounted at `/mnt/scapepc`), and converts each finished recording to a single `.ozx` on the
+  server, checks it, then deletes the run on the SCAPE PC (so its disk does not fill up); ~50 min
+  per 220 GB run, 10 volumes per shard. A run that fails to convert twice is moved as `.dat`
+  files instead; `--no-convert` always moves the files. Each run is renamed on the SCAPE
   PC as soon as it finishes (`sample1_run##_YYYYMMDD_HHMM`, numbered in order), so the acquisition
-  software can't reuse its name while it waits to be moved. It stops by itself after 3 h without
-  new recordings or transfers (`--timeout`). It keeps its own paths and imports
-  nothing from this repository.
+  software can't reuse its name while it waits to be converted. It stops by itself after 3 h
+  without new recordings or transfers (`--timeout`). It keeps its own paths and imports nothing
+  from this repository, but needs scapeio's `ozx` extra: run it with `uv run python ...`.
 - `preprocess_scape_exp.py`: for an experiment folder, fix the folder structure of each
   `sample#_run#` recording, compute its projection images (deskewed min/max/std projections and
   activity, `analysis/projection_images.h5` and OME-TIFFs; plus the median projection,
   `median_proj`, exact for runs with fewer than 75 volumes, else from 50 evenly spaced volumes,
-  as it needs all its volumes at once),
+  as it needs all its volumes at once; a stack over 8 GB is done one x-section per pass, to limit
+  RAM; all computed on the raw volumes, and only the final projections deskewed),
   combine the runs of each sample, and
   convert and deskew the high-resolution `_HR` volumes. For long recordings (folder name ending in the
   puparium formation time, `..._MM-DD_HHhMM`, optionally followed by e.g. `_FAIL`) each run still
