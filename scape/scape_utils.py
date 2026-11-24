@@ -607,8 +607,7 @@ def get_projection_images(scape_path: str | Path, batch_size: int | None = None,
         `_MedianStack`). If there is room for neither, the median is skipped
         with a warning. Default False.
     plot_activity : bool
-        Save the activity plot. Default True (`preprocess_scape_exp` sets it to
-        False for long recordings, which are summarized in a grid instead).
+        Save the activity plot. Default True.
     """
     # set save path
     scape_path = Path(scape_path)

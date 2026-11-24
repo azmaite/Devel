@@ -20,8 +20,8 @@ OME-TIFFs look left-right mirrored, although the data are not. Set napari's dept
   as it needs all its volumes at once),
   combine the runs of each sample, and
   convert and deskew the high-resolution `_HR` volumes. For long recordings (folder name ending in the
-  puparium formation time, `..._MM-DD_HHhMM`, optionally followed by e.g. `_FAIL`) the runs get
-  no individual activity plot; instead all (non-`_short`) runs are summarised in
+  puparium formation time, `..._MM-DD_HHhMM`, optionally followed by e.g. `_FAIL`) each run still
+  gets its own activity plot, and all (non-`_short`) runs are also summarised in
   `exp_folder/00_preanalysis/` (grids of the activity traces and of the max and median
   projections, flattened over depth, see `common/preanalysis.py`; the frequency analysis is in
   `analysis/scape/`). With
