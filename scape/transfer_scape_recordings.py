@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Watch a SCAPE experiment folder on the scapepc and MOVE each finished
-recording to the server, so the scapepc disk doesn't fill up during long
-(multi-day) acquisitions.
+Watch a SCAPE experiment folder on the scapepc and CONVERT each finished
+recording to a single lossless `.ozx` file on the server (or, with
+`--no-convert`, MOVE its files there as they are), so the scapepc disk doesn't
+fill up during long (multi-day) acquisitions.
 
 Source layout (as written by the SCAPE / Andor software), e.g.
 
@@ -18,11 +19,31 @@ Destination layout (same as the rest of /mnt/upramdya_data/MA/SCAPE), e.g.
 
     /mnt/upramdya_data/MA/SCAPE/20261021_xxx/
         sample1_run01_20261021_1641/
+            sample1_run01_20261021_1641.ozx              <- the whole recording
+            sample1_run01_20261021_1641.convert.json     <- conversion report
+        sample1_run02_short_20261021_1741/
+        ...
+
+`.ozx` files (single-file OME-Zarr, ~2.5x smaller than the spool files, with the
+DAQ data, `_info.mat` and the other sidecar files inside) are written by
+`scapeio.ozx.convert.convert` (the `ozx` branch of scapeio, needs Python >= 3.12,
+so run this script with the repository's `.venv`), as one-color runs with
+`SHARD_VOLUMES` volumes per shard (the converter's default of 400 makes ~70 GB
+shards for our 754-plane volumes). Each conversion reads the run straight from the scapepc,
+writes `<name>.ozx.partial`, checks it (every frame decoded and compared after
+encoding; sampled frames, the DAQ data and the sidecar files read back with an
+independent reader; every byte read back from the server and checked against
+its CRC32), renames it to `<name>.ozx`, and only then deletes the run's files on
+the scapepc. A 220 GB run takes ~50 min. If a run fails to convert twice, its
+files are moved instead (so it doesn't block the others), and can be converted
+later. `scape_utils.RawRecording` reads either layout.
+
+With `--no-convert`, the files are moved as they are:
+
+        sample1_run01_20261021_1641/
             sample1_run01_20261021_1641/     <- everything that was inside the source run folder
             sample1_run01_20261021_1641_info.mat
             sample1_run01_20261021_1641_stim_data.bin
-        sample1_run02_short_20261021_1741/
-        ...
 
 A recording counts as finished when its `_info.mat` and `Spooled files.sifx`
 both exist (these are written last, at the very end of the acquisition)
@@ -61,19 +82,22 @@ to be moved; the marker is deleted last, once everything else has been moved.
 If the script is interrupted it can simply be restarted: an interrupted
 rename is completed, and an interrupted transfer resumes.
 
-Each file is copied to a temporary `.partial` name, its size (and optionally
-md5 checksum) is checked against the source, it is renamed to the final name,
-and only then is the source file deleted. Files already present at the
-destination with the right size are not copied again.
+When moving files (`--no-convert`, or after a failed conversion), each file is
+copied to a temporary `.partial` name, its size (and optionally md5 checksum)
+is checked against the source, it is renamed to the final name, and only then
+is the source file deleted. Files already present at the destination with the
+right size are not copied again. An interrupted conversion starts again from
+scratch.
 
 Files that Solis writes into a run folder under its original name after the
 run was renamed (e.g. `ModifiedData/*locations.dat`, written when the next
 acquisition starts or when a recording is opened in Solis) are added to the
 right server folder, as long as the renamed run is still on the scapepc.
 
-Run it in a `tmux`/`screen` session so it survives closing the terminal:
+Run it in a `tmux`/`screen` session so it survives closing the terminal, from
+the `scape` folder with the repository's environment:
 
-    python transfer_scape_recordings.py /mnt/scapepc/MA_scape_data/20261021_V7xPR_pupa_long
+    uv run python transfer_scape_recordings.py /mnt/scapepc/MA_scape_data/20261021_V7xPR_pupa_long
 
 (give the full path to get tab completion, just the folder name, or nothing
 to choose the folder from a numbered list of experiments on the scapepc).
@@ -110,6 +134,10 @@ LOG_NAME = 'transfer_log.txt'
 MAX_START_DIFF = 300
 # _info.mat this much newer than the raw data: probably overwritten later
 MAX_INFO_DELAY = 1800
+# volumes per .ozx shard (~1.6 GB shards for 754-plane volumes)
+SHARD_VOLUMES = 10
+# failed conversions of a run after which its files are moved instead
+MAX_CONVERT_TRIES = 2
 
 _log_file: Optional[Path] = None
 _status_shown = False  # True while the one-line watching status is on screen
@@ -477,6 +505,53 @@ def transfer_run(src_exp: Path,
         f'({copied / 1e6 / max(dt, 1e-6):.0f} MB/s)')
 
 
+def convert_run(src_exp: Path,
+                dst_exp: Path,
+                src_name: str,
+                name: str,
+                dry_run: bool) -> None:
+    """
+    Convert one finished run, renamed to `name` on the scapepc (`src_name` is
+    only different in a dry run, where nothing is renamed), to
+    `dst_exp/name/name.ozx` with `scapeio.ozx.convert.convert`, which checks the
+    file and then deletes the run's files on the scapepc (see the module
+    docstring); then remove the marker and the emptied run folder.
+
+    Parameters
+    ----------
+    src_exp, dst_exp : Path
+        Experiment folder on the scapepc and on the server.
+    src_name, name : str
+        Name of the run folder on the scapepc, and its new name.
+    dry_run : bool
+        If True, only report what would be done.
+    """
+    src_run = src_exp / src_name
+    dst_run = dst_exp / name
+    raw_bytes = sum(p.stat().st_size for p in src_run.glob('*spool.dat'))
+    log(f'Converting {name}: {raw_bytes / 1e9:.1f} GB of spool files '
+        f'-> {dst_run / (name + ".ozx")}')
+    if dry_run:
+        return
+    from scapeio.ozx.convert import convert  # needs Python >= 3.12, see module docstring
+
+    t0 = time.time()
+    # overwrite: a .ozx left by a conversion interrupted after its rename but before
+    # the source was deleted is simply made again (the source is still complete)
+    report = convert(src_run, dst_run, colors=1, shard_volumes=SHARD_VOLUMES,
+                     overwrite=True, delete_source=True)
+    (src_run / MARKER).unlink(missing_ok=True)
+    remove_empty_dirs(src_run)
+    if src_run.exists():
+        log(f'  WARNING: {src_run} not empty after conversion')
+    for warning in report.get('warnings', []):
+        log(f'  converter warning: {warning}')
+    dt = time.time() - t0
+    log(f'Done {name}: {raw_bytes / 1e9:.1f} GB -> {report["output_bytes"] / 1e9:.1f} GB '
+        f'.ozx ({report["ratio_frames"]:.2f}x smaller) in {dt / 60:.1f} min '
+        f'({raw_bytes / 1e6 / max(dt, 1e-6):.0f} MB/s of raw data)')
+
+
 def watch(src_exp: Path,
           dst_exp: Path,
           settle: float,
@@ -485,12 +560,13 @@ def watch(src_exp: Path,
           poll: float,
           workers: int,
           checksum: bool,
+          convert: bool,
           once: bool,
           dry_run: bool) -> None:
     """
-    Poll `src_exp`, rename every finished run and move it to `dst_exp`,
-    until nothing has happened for `timeout` seconds (or until no finished
-    runs are left, if `once`).
+    Poll `src_exp`, rename every finished run and convert it to a `.ozx` in
+    `dst_exp` (or move its files there), until nothing has happened for
+    `timeout` seconds (or until no finished runs are left, if `once`).
 
     Parameters
     ----------
@@ -511,6 +587,10 @@ def watch(src_exp: Path,
         Number of files copied in parallel.
     checksum : bool
         Verify copies with md5 checksums in addition to file sizes.
+    convert : bool
+        Convert each run to a `.ozx` (see `convert_run()`) instead of moving
+        its files; a run that fails to convert `MAX_CONVERT_TRIES` times is
+        moved instead.
     once : bool
         Transfer whatever is finished now, then exit.
     dry_run : bool
@@ -520,6 +600,7 @@ def watch(src_exp: Path,
     reported = set()  # (run, reason) already logged, to log each only once
     dry_renamed = {}  # dry run only: original name -> would-be new name
     dry_moved = set()  # dry run only: original names already 'moved'
+    convert_failures = {}  # run -> number of failed conversions
     last_activity = time.time()  # last rename/move or scapepc file change
 
     def report(run: str,
@@ -619,12 +700,23 @@ def watch(src_exp: Path,
                     if run not in dry_moved]
         if todo or todo_dry:
             src_name, name = ((todo[0], todo[0]) if todo else todo_dry[0])
-            try:
-                transfer_run(src_exp, dst_exp, src_name, name, workers,
-                             checksum, dry_run)
-            except Exception as e:  # keep watching, retry on next poll
-                log(f'ERROR moving {name}: {e!r} (will retry)')
-                time.sleep(poll)
+            if convert and convert_failures.get(name, 0) < MAX_CONVERT_TRIES:
+                try:
+                    convert_run(src_exp, dst_exp, src_name, name, dry_run)
+                except Exception as e:  # keep watching, retry on next poll
+                    convert_failures[name] = convert_failures.get(name, 0) + 1
+                    (dst_exp / name / (name + '.ozx.partial')).unlink(missing_ok=True)
+                    then = ('will retry' if convert_failures[name] < MAX_CONVERT_TRIES
+                            else 'will move its files instead')
+                    log(f'ERROR converting {name}: {e!r} ({then})')
+                    time.sleep(poll)
+            else:
+                try:
+                    transfer_run(src_exp, dst_exp, src_name, name, workers,
+                                 checksum, dry_run)
+                except Exception as e:  # keep watching, retry on next poll
+                    log(f'ERROR moving {name}: {e!r} (will retry)')
+                    time.sleep(poll)
             if dry_run:
                 dry_moved.add(src_name)
             last_activity = time.time()
@@ -653,8 +745,8 @@ def watch(src_exp: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description='Move finished SCAPE recordings from the scapepc to the '
-                    'server as they are acquired.')
+        description='Convert finished SCAPE recordings on the scapepc to .ozx '
+                    'files on the server (or move them) as they are acquired.')
     parser.add_argument('experiment', nargs='?', default=None,
                         help='Experiment folder name in --src-root (e.g. '
                              '20261021_V7xPR_pupa_long) or full path (use '
@@ -678,10 +770,15 @@ def main() -> None:
                              '(default: 3)')
     parser.add_argument('--poll', type=float, default=60,
                         help='Seconds between checks (default: 60)')
+    parser.add_argument('--no-convert', action='store_true',
+                        help='Move the files of each run as they are, instead '
+                             'of converting the run to a .ozx')
     parser.add_argument('--workers', type=int, default=4,
-                        help='Files copied in parallel (default: 4)')
+                        help='Files copied in parallel when moving them '
+                             '(default: 4)')
     parser.add_argument('--checksum', action='store_true',
-                        help='Also verify md5 checksums (slower)')
+                        help='Also verify md5 checksums when moving files '
+                             '(slower)')
     parser.add_argument('--once', action='store_true',
                         help='Move runs that are already finished, then exit')
     parser.add_argument('--dry-run', action='store_true',
@@ -694,7 +791,15 @@ def main() -> None:
     if not args.dry_run:
         dst_exp.mkdir(parents=True, exist_ok=True)
         _log_file = dst_exp / LOG_NAME
-    log(f'Watching {src_exp}\n    moving finished runs to {dst_exp}\n'
+    convert = not args.no_convert
+    if convert:
+        try:  # fail now, not after the first recording, if scapeio[ozx] is missing
+            import scapeio.ozx.convert  # noqa: F401
+        except ImportError as e:
+            sys.exit(f'Cannot convert to .ozx ({e!r}): run this script with the '
+                     f'repository\'s environment (uv run python ...), or use --no-convert.')
+    action = 'converting finished runs to .ozx in' if convert else 'moving finished runs to'
+    log(f'Watching {src_exp}\n    {action} {dst_exp}\n'
         f'    settle={args.settle:.0f}s no_sifx_after={args.no_sifx_after:.0f}s '
         f'timeout={args.timeout:g}h '
         f'poll={args.poll:.0f}s workers={args.workers} '
@@ -702,7 +807,7 @@ def main() -> None:
     try:
         watch(src_exp, dst_exp, args.settle, args.no_sifx_after,
               args.timeout * 3600, args.poll,
-              args.workers, args.checksum, args.once, args.dry_run)
+              args.workers, args.checksum, convert, args.once, args.dry_run)
     except KeyboardInterrupt:
         log('Stopped by user')
 
