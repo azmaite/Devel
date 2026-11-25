@@ -36,7 +36,7 @@ summarized in
   in 3-column grids in time order (shared x and y limits with the subplots touching, so each
   row reads as one continuous trace, or each subplot with its own y limits)
 - `max_projection_grid.png` / `median_grid.png`: every run's max / median projection, flattened
-  by averaging over depth (axis 0 of the deskewed (z, x, y) projection) and shown with its
+  by their max over depth (axis 0 of the deskewed (z, x, y) projection) and shown with its
   true x/y aspect ratio, all with one shared contrast
 The recording time is `scanStartTimeApprox` from the run's `_info.mat`, or else the
 `_YYYYMMDD_HHMM` at the end of the run folder name; if neither is found the hAPF is omitted.
@@ -341,7 +341,7 @@ def _long_run_folders(exp_folder: Path) -> list[Path]:
 def _save_grids(exp_folder: Path) -> None:
     """
     Save grids of the runs' max and median projections (see `GRID_NAMES`) in
-    `<exp_folder>/00_preanalysis/`, each flattened by averaging over depth (axis 0 of the
+    `<exp_folder>/00_preanalysis/`, each flattened by its max over depth (axis 0 of the
     deskewed (z, x, y) projection) and shown with its true aspect ratio (x voxel size over y
     voxel size), labelled with its recording time and hours APF. Runs without a median
     projection are left out of the median grid.
@@ -355,7 +355,7 @@ def _save_grids(exp_folder: Path) -> None:
                            / scape_utils.PROJECTION_FILE_NAME, 'r') as f:
                 if key not in f:
                     continue
-                images.append(np.mean(f[key][:], axis=0))  # type: ignore[index]
+                images.append(np.max(f[key][:], axis=0))  # type: ignore[index]
                 voxel_x, voxel_y, _ = f['voxel_sizes_xyz'][:]  # type: ignore[index]
             aspects.append(voxel_x / voxel_y)
             time_t = _get_recording_time(scape_path)
