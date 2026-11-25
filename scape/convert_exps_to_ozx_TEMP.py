@@ -3,8 +3,9 @@ TEMPORARY script: convert the runs of existing SCAPE experiments from .dat spool
 single `.ozx` files, then delete the .dat files. Delete this script once all experiments are
 converted (new recordings are converted by `transfer_scape_recordings.py`).
 
-For each experiment folder given, every `sample#_run#` folder that still has .dat files
-(not the `_HR` ones, which are converted to nrrd by `preprocess_scape_exp.py`, nor the
+For each experiment folder given, every `sample#_run#` folder that still has its raw data
+subfolder (`sample#_run#/sample#_run#/`, removed once its .dat files are deleted; the .dat
+files themselves are never listed beforehand, as there are thousands per run) (not the `_HR` ones, which are converted to nrrd by `preprocess_scape_exp.py`, nor the
 `sample#_combined` ones) gets its folder structure fixed (`scape_utils.check_folder_structure`)
 and is converted with `scapeio.ozx.convert.convert` to `sample#_run#/sample#_run#.ozx`
 (`SHARD_VOLUMES` volumes per shard), which `scape_utils.RawRecording` then reads instead. The
@@ -13,7 +14,8 @@ DAQ data and the sidecar files read back with an independent reader; every byte 
 the server and checked against its CRC32) before giving it its final name, and only then
 deletes the run's .dat, `.ini`, `.sifx`, `ModifiedData`, `_info.mat` and `_stim_data.bin` files
 (all stored in the `.ozx`), unless `--keep-dat`. A run that already has a `.ozx` but still has
-.dat files is converted again (overwriting it), so its .dat files are only deleted after a check.
+its raw data subfolder is converted again (overwriting it), so its .dat files are only deleted
+after a check.
 
 A 220 GB run takes ~50 min (reading the .dat files from the server is the limit). Runs that
 fail are logged and skipped. Everything is logged
@@ -52,18 +54,19 @@ def _log(exp_folder: Path,
         f.write(line + '\n')
 
 
-def _dat_files(scape_path: Path) -> list[Path]:
+def _has_raw_data(scape_path: Path) -> bool:
     """
-    The .dat spool files of a run, in its raw data subfolder or (before its folder
-    structure is fixed) directly in the run folder.
+    Whether a run still has its raw data: its raw data subfolder, or (before its folder
+    structure is fixed) .dat files directly in the run folder. Never lists the raw data
+    subfolder, which holds thousands of .dat files.
     """
-    return (list((scape_path / scape_path.name).glob('*spool.dat'))
-            + list(scape_path.glob('*spool.dat')))
+    return ((scape_path / scape_path.name).is_dir()
+            or any(p.suffix == '.dat' for p in scape_path.iterdir()))
 
 
 def runs_to_convert(exp_folder: Path) -> list[Path]:
     """
-    The `sample#_run#` folders of an experiment that still have .dat files (not `_HR`
+    The `sample#_run#` folders of an experiment that still have raw data (not `_HR`
     or `sample#_combined` ones), sorted by name.
 
     Parameters
@@ -78,7 +81,7 @@ def runs_to_convert(exp_folder: Path) -> list[Path]:
     """
     return sorted(p for p in exp_folder.iterdir()
                   if p.is_dir() and p.name.startswith('sample') and '_run' in p.name
-                  and not p.name.endswith('_HR') and _dat_files(p))
+                  and not p.name.endswith('_HR') and _has_raw_data(p))
 
 
 def convert_one_run(scape_path: Path,
@@ -103,8 +106,7 @@ def convert_one_run(scape_path: Path,
     try:
         scape_utils.check_folder_structure(scape_path)
         raw_path = scape_path / scape_path.name
-        raw_bytes = sum(p.stat().st_size for p in raw_path.glob('*spool.dat'))
-        _log(exp_folder, f'Converting {scape_path.name} ({raw_bytes / 1e9:.1f} GB)...')
+        _log(exp_folder, f'Converting {scape_path.name}...')
         t0 = time.time()
         last_tenth = [0]
 
@@ -127,8 +129,8 @@ def convert_one_run(scape_path: Path,
         for warning in report.get('warnings', []):
             _log(exp_folder, f'  {scape_path.name}: converter warning: {warning}')
         dt = time.time() - t0
-        _log(exp_folder, f'Done {scape_path.name}: {raw_bytes / 1e9:.1f} GB -> '
-                         f'{report["output_bytes"] / 1e9:.1f} GB ({report["ratio_frames"]:.2f}x) '
+        _log(exp_folder, f'Done {scape_path.name}: {report["output_bytes"] / 1e9:.1f} GB '
+                         f'({report["ratio_frames"]:.2f}x smaller) '
                          f'in {dt / 60:.1f} min'
                          + ('; .dat files deleted' if delete_dat else '; .dat files kept'))
         return True
@@ -156,19 +158,15 @@ def main() -> None:
         if not exp_folder.is_dir():
             raise SystemExit(f'Not a folder: {exp_folder}')
         runs = runs_to_convert(exp_folder)
-        size = sum(f.stat().st_size for run in runs for f in _dat_files(run))
-        print(f'{exp_folder.name}: {len(runs)} runs with .dat files ({size / 1e9:.0f} GB)')
+        print(f'{exp_folder.name}: {len(runs)} runs with raw data')
         for run in runs:
             print(f'    {run.name}')
         todo += runs
     if not todo:
         print('Nothing to convert.')
         return
-    action = 'keep' if args.keep_dat else 'DELETE (after checking each .ozx)'
-    if input(f'Convert these {len(todo)} runs and {action} their .dat '
-                              f'files? [y/N] ').strip().lower() != 'y':
-        print('Cancelled.')
-        return
+    action = 'keeping' if args.keep_dat else 'deleting (after checking each .ozx)'
+    print(f'Converting these {len(todo)} runs and {action} their .dat files...')
 
     results = [convert_one_run(run, not args.keep_dat) for run in todo]
     failed = [run for run, ok in zip(todo, results) if not ok]
