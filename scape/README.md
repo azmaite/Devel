@@ -44,8 +44,11 @@ so the runs of a sample can still be combined.
   `transfer_scape_recordings.py`, preprocessing each run as soon as it is transferred, and
   combines the runs once no new run has appeared for 3 h (or on Ctrl+C). E.g.
   `python preprocess_scape_exp.py exp_folder [-b N] [-o]`.
-- `register_min_proj.py`: rigidly register the min projection of one run to another run of the
-  same sample.
+- `register_median_proj.py`: rigidly register the median projection of one run to another run of
+  the same sample.
+- `motion_across_runs.py`: rigidly register the median projection of every run of an experiment
+  to the first long run and plot the shifts, rotations and correlations over time (in
+  `{exp}/00_motion-analysis`). E.g. `python motion_across_runs.py exp_folder`.
 - `edit_labels_napari.py`: open a label tif in napari as an editable Labels layer next to the
   recording's projection.
 - `segment_muscles_activity.py`: naive split of leg segments (front femur and tibia, middle
