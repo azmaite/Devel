@@ -7,8 +7,9 @@ Laboratory, EPFL). Under active development.
 Two types of raw data:
 - 2D videos from Victor Stimplin's **FlyTrack**, saved as .mkv videos where each saved RGBA frame
   packs 4 real frames (one per channel).
-- 3D videos from Jasper Phelps's **SCAPE**, saved as .dat volumes, loaded with `scapeio`; they
-  need deskewing.
+- 3D videos from Jasper Phelps's **SCAPE**, saved as .dat volumes, which are converted to a single
+  lossless `.ozx` file per recording (see `scape/README.md`), loaded with `scapeio`; they need
+  deskewing.
 
 ## Pipelines and folders
 
@@ -42,9 +43,10 @@ labels mapped back onto each recording) -> time traces. CT-scan labels from WebK
 The pipeline folders are folders of scripts, run from their own folder; only `common` is a
 package. Install the repository once in each environment you use, so `from common import ...`
 works everywhere:
-- uv environment (`.venv`, used for FlyTrack and WebKnossos): `uv sync` (installs the
-  dependencies of `pyproject.toml` and this repository in editable mode).
-- conda environment `scapeio` (SCAPE and the master reference): `pip install -e . --no-deps`.
+- uv environment (`.venv`, Python 3.12, used for FlyTrack, SCAPE and WebKnossos): `uv sync`
+  (installs the dependencies of `pyproject.toml`, including scapeio with its `ozx` extra from
+  `../scapeio` on its `ozx` branch, and this repository in editable mode).
+- conda environment `scapeio` (the master reference): `pip install -e . --no-deps`.
 
 Data locations are set in `common/paths.py`.
 
