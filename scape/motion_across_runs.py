@@ -21,7 +21,8 @@ Outputs, in `{exp}/00_motion-analysis`:
   between where the two send a corner,
 - `motion_across_runs.png`: the same over the run start time (from the folder name), the
   direct alignment solid and the chained one dashed (`plot_motion`; replot only with
-  `--plot_only`),
+  `--plot_only`); also copied to `_analysis/motion-analysis/motion_across_runs_YYYYMMDD.png`
+  next to the experiment folders (in the SCAPE folder), to compare experiments,
 - `median_projections/`: `{run#}_median.ome.tif` (the median projection of each run, a copy) and
   `{run#}_median_aligned_chained.ome.tif` (resampled onto the first run's grid with the chained
   transform, which is saved next to it as `.tfm`), to compare runs, e.g. with
@@ -46,9 +47,11 @@ import SimpleITK as sitk
 import tifffile
 
 import scape_utils
+from common.power_spectrum import COMMON_FOLDER
 from register_median_proj import _load_median_proj_sitk, register_median_proj, save_aligned
 
 OUT_FOLDER_NAME = '00_motion-analysis'
+COMMON_SUBFOLDER = 'motion-analysis'  # in COMMON_FOLDER, for the plots of every experiment
 
 
 prev_keys = ('rot_x', 'rot_y', 'rot_z', 'tx', 'ty', 'tz', 'correlation')
@@ -124,6 +127,11 @@ def plot_motion(exp_path: str | Path) -> None:
     fig.savefig(out_path / 'motion_across_runs.png', dpi=150)
     plt.close(fig)
     print(f'Saved motion_across_runs.png to {out_path}')
+    common = exp_path.parent / COMMON_FOLDER / COMMON_SUBFOLDER
+    common.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(out_path / 'motion_across_runs.png',
+                    common / f'motion_across_runs_{exp_path.name[:8]}.png')
+    print(f'Copied it to {common}')
 
 
 def motion_across_runs(exp_path: str | Path) -> pd.DataFrame:
