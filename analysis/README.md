@@ -25,7 +25,7 @@ which one the fly eclosed (`n` if it did not). The answer is saved in
     color being each recording's normalized power relative to the mean over the recordings at
     that frequency (red: more of its power there than the average recording, blue: less)
 
-  Each plot is also copied to a common `_analysis/` folder next to the experiment folders (in
+  Each plot is also copied to a common `_analysis/frequency_analysis/` folder next to the experiment folders (in
   the SCAPE folder, or in `Pupa_muscle_long_recordings/` for FlyTrack), with the experiment
   date added to its name (`power_spectrum_log_YYYYMMDD.png`), so the same plot of every
   experiment is listed together. `_analysis/experiments.csv` lists the analysed experiments

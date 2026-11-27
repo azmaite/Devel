@@ -38,6 +38,9 @@ summarized in
 - `max_projection_grid.png` / `median_grid.png`: every run's max / median projection, flattened
   by their max over depth (axis 0 of the deskewed (z, x, y) projection) and shown with its
   true x/y aspect ratio, all with one shared contrast
+- `median_video.mp4`: every run's median projection in gray, 1/3 s each, with its own contrast:
+  the max over depth on top (x vertical, y horizontal reversed) and the max over x below it
+  (depth vertical, the same y)
 The recording time is `scanStartTimeApprox` from the run's `_info.mat`, or else the
 `_YYYYMMDD_HHMM` at the end of the run folder name; if neither is found the hAPF is omitted.
 The sample#_combined activity plot stays in its folder. The frequency analysis of the activity
@@ -64,7 +67,8 @@ convert_HR_folders: convert all sample#_run#_HR subfolders of an experiment fold
     single (not deskewed) nrrd each, delete their raw .dat files, and save a deskewed
     OME-TIFF of each (see save_HR_deskewed_tif).
 load_activity_traces: load the activity traces of a long-recording experiment's runs.
-save_preanalysis: save the activity, max projection and median grids of a long recording in
+save_preanalysis: save the activity, max projection and median grids and the median video of
+    a long recording in
     `<exp_folder>/00_preanalysis/` (can be run on its own, e.g. for experiments processed
     before it existed).
 preprocess_scape_exp: main function, converts the HR folders (see convert_HR_folders), then
@@ -80,9 +84,13 @@ import time
 from pathlib import Path
 
 import h5py
+import imageio.v2 as imageio
+import matplotlib.font_manager as font_manager
 import numpy as np
 import scapeio
+import scipy.ndimage as ndi
 import tifffile
+from PIL import Image, ImageDraw, ImageFont
 
 import scape_utils
 from common import preanalysis
@@ -91,6 +99,11 @@ from common.preanalysis import PREANALYSIS_FOLDER, get_hours_apf, get_time_0
 
 # image grids in 00_preanalysis: dataset in projection_images.h5 -> file name
 GRID_NAMES = {'max_proj': 'max_projection_grid.png', 'median_proj': 'median_grid.png'}
+# video of the runs' median projections in 00_preanalysis (see `_save_median_video()`)
+MEDIAN_VIDEO_NAME = 'median_video.mp4'
+MEDIAN_VIDEO_RUN_S = 1 / 3   # seconds each run is shown
+MEDIAN_VIDEO_UM = 1.0        # pixel size of the video
+MEDIAN_VIDEO_PERCENTILE = 99.7  # white level of each run (of its non-zero pixels)
 LIVE_POLL = 60              # live mode: seconds between checks for new runs
 LIVE_TIMEOUT_HOURS = 3      # live mode: stop after this long without a new run
 
@@ -359,24 +372,37 @@ def _save_grids(exp_folder: Path) -> None:
     `<exp_folder>/00_preanalysis/`, each flattened by its max over depth (axis 0 of the
     deskewed (z, x, y) projection) and shown with its true aspect ratio (x voxel size over y
     voxel size), labelled with its recording time and hours APF. Runs without a median
-    projection are left out of the median grid.
+    projection are left out of the median grid. The median projections also make the median
+    video (see `_save_median_video()`).
     """
     time_0 = get_time_0(exp_folder)
     run_paths = _long_run_folders(exp_folder)
     for key, name in GRID_NAMES.items():
         images, titles, aspects = [], [], []
+        video_panels, video_captions = [], []
         for scape_path in run_paths:
             with h5py.File(scape_path / scape_utils.ANALYSIS_PATH_NAME
                            / scape_utils.PROJECTION_FILE_NAME, 'r') as f:
                 if key not in f:
                     continue
-                images.append(np.max(f[key][:], axis=0))  # type: ignore[index]
-                voxel_x, voxel_y, _ = f['voxel_sizes_xyz'][:]  # type: ignore[index]
+                volume = f[key][:]  # type: ignore[index]
+                voxel_x, voxel_y, voxel_z = f['voxel_sizes_xyz'][:]  # type: ignore[index]
+            images.append(np.max(volume, axis=0))
             aspects.append(voxel_x / voxel_y)
             time_t = _get_recording_time(scape_path)
             hours = get_hours_apf(time_0, time_t)
             title = time_t.strftime('%m%d_%H%M') if time_t is not None else scape_path.name
             titles.append(title if hours is None else f'{title} - {hours}h APF')
+            if key == 'median_proj':
+                # (z, x, y): max over z, (x, y), and max over x, (z, y), each resampled to
+                # MEDIAN_VIDEO_UM pixels, with y reversed
+                video_panels.append(tuple(
+                    ndi.zoom(proj[:, ::-1].astype(np.float32),
+                             (size_rows / MEDIAN_VIDEO_UM, voxel_y / MEDIAN_VIDEO_UM), order=1)
+                    for proj, size_rows in ((volume.max(axis=0), voxel_x),
+                                            (volume.max(axis=1), voxel_z))))
+                run_id = next(t for t in scape_path.name.split('_') if t.startswith('run'))
+                video_captions.append(run_id if hours is None else f'{run_id}_{hours}hAPF')
         if len(images) < len(run_paths):
             print(f'{len(run_paths) - len(images)} runs have no {key}, left out of {name}.')
         if len(set(aspects)) > 1:
@@ -385,6 +411,62 @@ def _save_grids(exp_folder: Path) -> None:
         if images:
             preanalysis.save_image_grid(images, titles, exp_folder / PREANALYSIS_FOLDER / name,
                                         aspect=aspects[0], suptitle=exp_folder.name)
+        if video_panels and len(set(aspects)) == 1:
+            _save_median_video(video_panels, video_captions,
+                               exp_folder / PREANALYSIS_FOLDER / MEDIAN_VIDEO_NAME)
+
+
+def _save_median_video(panels: list,
+                       captions: list,
+                       path: Path) -> None:
+    """
+    Save a video of the runs' median projections, one run after the other, each
+    `MEDIAN_VIDEO_RUN_S` seconds, in gray with its own white level (`MEDIAN_VIDEO_PERCENTILE` of
+    its non-zero pixels), captioned on top: the maximum projection over z (x, roughly the long
+    axis of the pupa, vertical; y horizontal), and below it, after a white line, the maximum
+    projection over x (z vertical, the same y), as in `scape/video_motion_runs.py`, cropped to
+    where any run has data.
+
+    Parameters
+    ----------
+    panels : list of tuple of np.ndarray
+        Per run, the top (x, y) and bottom (z, y) images (padded with zeros to the largest
+        shape if they differ).
+    captions : list of str
+        Per run, its caption.
+    path : Path
+        Output mp4 path.
+
+    Returns
+    -------
+    None
+    """
+    def nonzero(images, axis):
+        # first and last row (axis 0) or column (axis 1) where any image has data
+        found = np.flatnonzero(np.any([np.any(im > 0, axis=1 - axis) for im in images], axis=0))
+        return slice(found[0], found[-1] + 1)
+
+    # runs on a slightly different grid (e.g. without the flyback frames) are padded with zeros
+    tops, bottoms = ([np.pad(im, [(0, n - s) for n, s in zip(np.max([i.shape for i in ims], axis=0),
+                                                             im.shape)]) for im in ims]
+                     for ims in ([p[0] for p in panels], [p[1] for p in panels]))
+    y = nonzero(tops + bottoms, 1)
+    rows_top, rows_bottom = nonzero(tops, 0), nonzero(bottoms, 0)
+    font = ImageFont.truetype(font_manager.findfont('DejaVu Sans'), 20)
+    band = 32  # caption band height
+    with imageio.get_writer(path, fps=1 / MEDIAN_VIDEO_RUN_S, codec='libx264', quality=8,
+                            macro_block_size=2, pixelformat='yuv420p') as writer:
+        for top, bottom, caption in zip(tops, bottoms, captions):
+            top, bottom = top[rows_top, y], bottom[rows_bottom, y]
+            values = np.concatenate([top[top > 0], bottom[bottom > 0]])
+            vmax = np.percentile(values, MEDIAN_VIDEO_PERCENTILE) if values.size else 1.0
+            image = np.concatenate([np.zeros((band, top.shape[1])), top / vmax,
+                                    np.ones((2, top.shape[1])), bottom / vmax])
+            image = np.pad(image, [(0, image.shape[0] % 2), (0, image.shape[1] % 2)])  # H.264
+            frame = Image.fromarray((np.clip(image, 0, 1) * 255).astype(np.uint8))
+            ImageDraw.Draw(frame).text((8, 4), caption, font=font, fill=255)
+            writer.append_data(np.repeat(np.asarray(frame)[..., None], 3, axis=2))
+    print(f'Saved {path}')
 
 
 def save_preanalysis(exp_folder: str | Path) -> None:
@@ -392,7 +474,8 @@ def save_preanalysis(exp_folder: str | Path) -> None:
     Save the pre-analysis plots of a long-recording experiment in
     `<exp_folder>/00_preanalysis/`: the activity grids of its runs (see
     `load_activity_traces()` and `common.preanalysis.save_activity_summary()`) and the grids of
-    their max and median projections (see `_save_grids()`). Does nothing if the experiment
+    their max and median projections and the median video (see `_save_grids()`). Does nothing
+    if the experiment
     folder name does not end with the puparium formation time (`..._MM-DD_HHhMM`).
 
     Parameters

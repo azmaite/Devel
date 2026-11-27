@@ -20,7 +20,7 @@ yet). Saved in ``<main>/00_frequency_analysis/`` (see `common.power_spectrum`):
     - ``power_spectrum_heatmap_relative.png``: hAPF against frequency, the
       normalized power relative to its mean over the recordings
 
-Each plot is also copied to ``_analysis/`` next to the main folder (in
+Each plot is also copied to ``_analysis/frequency_analysis/`` next to the main folder (in
 ``Pupa_muscle_long_recordings/``), named with the experiment date
 (``power_spectrum_log_YYYYMMDD.png``), to compare experiments, and the
 experiment is added to ``_analysis/experiments.csv`` (with its eclosion and a

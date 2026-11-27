@@ -38,14 +38,24 @@ so the runs of a sample can still be combined.
   puparium formation time, `..._MM-DD_HHhMM`, optionally followed by e.g. `_FAIL`) each run still
   gets its own activity plot, and all (non-`_short`) runs are also summarised in
   `exp_folder/00_preanalysis/` (grids of the activity traces and of the max and median
-  projections, flattened over depth, see `common/preanalysis.py`; the frequency analysis is in
+  projections, flattened over depth, see `common/preanalysis.py`, and `median_video.mp4`, the
+  median projections over depth and over x, one run every 1/3 s; the frequency analysis is in
   `analysis/scape/`). With
   `-l`/`--live` it runs alongside
   `transfer_scape_recordings.py`, preprocessing each run as soon as it is transferred, and
   combines the runs once no new run has appeared for 3 h (or on Ctrl+C). E.g.
   `python preprocess_scape_exp.py exp_folder [-b N] [-o]`.
-- `register_min_proj.py`: rigidly register the min projection of one run to another run of the
-  same sample.
+- `register_median_proj.py`: rigidly register the median projection of one run to another run of
+  the same sample.
+- `motion_across_runs.py`: rigidly register the median projection of every run of an experiment
+  to the first long run and to the previous run, plot the shifts, rotations and correlations
+  over time, and save the median projections aligned with the chained run-to-previous
+  transforms (in `{exp}/00_motion-analysis`). E.g. `python motion_across_runs.py exp_folder`.
+- `video_motion_runs.py`: green-magenta overlay video (`median_overlay.mp4`) of the first run
+  (green) with each run in turn (magenta, 1/4 s each, captioned `{run#}_{hours}hAPF`), side by
+  side for the original, direct-aligned and chain-aligned median projections (from
+  `motion_across_runs.py`); each column shows the max projection over z (long axis x vertical)
+  on top and over x below. E.g. `python video_motion_runs.py exp_folder`.
 - `edit_labels_napari.py`: open a label tif in napari as an editable Labels layer next to the
   recording's projection.
 - `segment_muscles_activity.py`: naive split of leg segments (front femur and tibia, middle

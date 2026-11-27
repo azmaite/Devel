@@ -24,7 +24,8 @@ save_relative_heatmap: save the normalized power spectra of many traces as a hea
     against frequency), each frequency relative to its mean over the traces.
 save_frequency_analysis: save all of these for the recordings of a long recording before
     eclosion, in `<experiment folder>/FREQUENCY_FOLDER`, and a copy of each in the
-    `COMMON_FOLDER` next to the experiment folders, named with the experiment date.
+    `COMMON_FOLDER/COMMON_SUBFOLDER` next to the experiment folders, named with the experiment
+    date.
 copy_to_common_folder: copy an experiment's plots to that common folder.
 update_experiment_list: add an experiment to the `EXPERIMENT_LIST` of that common folder (its
     eclosion, and a comment to fill in by hand), or update its eclosion.
@@ -44,6 +45,7 @@ FREQUENCY_FOLDER = '00_frequency_analysis'  # in the experiment (main) folder
 # the plots of every experiment, side by side: next to the experiment folders (e.g. in the SCAPE
 # folder), each plot named with the experiment date, `<plot name>_YYYYMMDD.png`
 COMMON_FOLDER = '_analysis'
+COMMON_SUBFOLDER = 'frequency_analysis'  # in COMMON_FOLDER, for the plots
 # in COMMON_FOLDER: one row per analysed experiment, sorted by name (i.e. date), with its
 # eclosion and a free comment (edit the comments by hand; they are kept when the list is updated)
 EXPERIMENT_LIST = 'experiments.csv'
@@ -358,7 +360,8 @@ def save_frequency_analysis(exp_folder: str | os.PathLike,
     linear frequency axis, and normalized with a log one (see `save_power_spectrum_summary()`),
     the band power against hours APF (see `save_band_power()`), and the heatmap of the
     normalized spectra relative to their mean (see `save_relative_heatmap()`). Each plot is also
-    copied to the `COMMON_FOLDER` next to the experiment folder (see `copy_to_common_folder()`),
+    copied to `COMMON_FOLDER/COMMON_SUBFOLDER` next to the experiment folder (see
+    `copy_to_common_folder()`),
     so the same plot of every experiment is in one place, and the experiment is added to the
     list of experiments there (see `update_experiment_list()`).
 
@@ -415,8 +418,8 @@ def save_frequency_analysis(exp_folder: str | os.PathLike,
 def copy_to_common_folder(exp_folder: str | os.PathLike,
                           folder: str | os.PathLike) -> str:
     """
-    Copy the plots (.png) of an experiment's analysis `folder` to the `COMMON_FOLDER` next to
-    the experiment folder, adding the experiment date to their names
+    Copy the plots (.png) of an experiment's analysis `folder` to `COMMON_FOLDER/COMMON_SUBFOLDER`
+    next to the experiment folder, adding the experiment date to their names
     (`power_spectrum_log.png` -> `power_spectrum_log_YYYYMMDD.png`), so the same plot of every
     experiment is listed together. Copies of an earlier run are overwritten.
 
@@ -436,7 +439,7 @@ def copy_to_common_folder(exp_folder: str | os.PathLike,
     name = os.path.basename(exp_folder)
     match = re.match(r'\d{8}', name)
     date = match.group() if match else name
-    common = os.path.join(os.path.dirname(exp_folder), COMMON_FOLDER)
+    common = os.path.join(os.path.dirname(exp_folder), COMMON_FOLDER, COMMON_SUBFOLDER)
     os.makedirs(common, exist_ok=True)
     for file in sorted(os.listdir(folder)):
         stem, ext = os.path.splitext(file)
