@@ -173,6 +173,8 @@ def main() -> None:
     print(f'\nConverted {len(todo) - len(failed)} of {len(todo)} runs.')
     for run in failed:
         print(f'    FAILED: {run.parent.name}/{run.name} (see {run.parent / LOG_NAME})')
+    if failed:  # nonzero exit, so a chained `&& preprocess_scape_exp.py` does not start
+        raise SystemExit('Run this script again to retry the failed runs.')
     print('\nNow recompute the projections of each converted experiment:')
     for exp_folder in exp_folders:
         print(f'    uv run python preprocess_scape_exp.py {exp_folder} -o')
