@@ -11,6 +11,9 @@ Registration is done in physical units (using `scape_utils.load_voxel_size`, so 
 voxels are handled correctly), with a correlation metric on a coarse-to-fine pyramid. Voxels
 that are zero in either image (deskewing padding) are excluded from the metric.
 
+Either run can also be given as an analysis folder inside its `sample#_run#` folder (e.g. an
+older `analysis_dat_old`) to use the projections there instead of the current analysis folder.
+
 Can be run from the terminal
 (`python register_median_proj.py moving_run_folder fixed_run_folder`) or imported and called as a
 function.
@@ -18,6 +21,7 @@ function.
 register_median_proj: register the median projection of the moving run to that of the fixed run,
     save the aligned median projection and the transform, and return the transform and the
     correlation after alignment.
+save_aligned: save an aligned median projection and its transform.
 """
 
 import argparse
@@ -30,22 +34,37 @@ import tifffile
 import scape_utils
 
 
-def _load_median_proj_sitk(scape_path: Path) -> sitk.Image:
+def _run_and_analysis(path: Path) -> tuple[Path, Path]:
+    """
+    Split `path` (a `sample#_run#` folder, or an analysis folder inside one) into the run folder
+    and the analysis folder to use.
+    """
+    if path.name.startswith(scape_utils.ANALYSIS_PATH_NAME):
+        return path.parent, path
+    return path, scape_utils.analysis_path_for(path)
+
+
+def _load_median_proj_sitk(path: Path) -> sitk.Image:
     """
     Load a run's median projection as a float32 SimpleITK image in the same ZYX
     orientation as the saved OME-TIFFs, with the voxel size as spacing.
 
     Parameters
     ----------
-    scape_path : Path
-        Path to a `sample#_run#` folder with projections already computed.
+    path : Path
+        Path to a `sample#_run#` folder with projections already computed, or to an analysis
+        folder inside one with `median_proj.ome.tif`.
 
     Returns
     -------
     sitk.Image
         3D image, array axes (z, y, x), spacing in um.
     """
-    median_proj = scape_utils.load_proj(scape_path, 'median_proj').transpose(0, 2, 1)
+    scape_path, analysis_path = _run_and_analysis(path)
+    if analysis_path == scape_utils.analysis_path_for(scape_path):
+        median_proj = scape_utils.load_proj(scape_path, 'median_proj').transpose(0, 2, 1)
+    else:
+        median_proj = tifffile.imread(analysis_path / 'median_proj.ome.tif')
     voxel_size = scape_utils.load_voxel_size(scape_path)
     image = sitk.GetImageFromArray(np.ascontiguousarray(median_proj, dtype=np.float32))
     image.SetSpacing((voxel_size['x'], voxel_size['y'], voxel_size['z']))
@@ -53,7 +72,8 @@ def _load_median_proj_sitk(scape_path: Path) -> sitk.Image:
 
 
 def register_median_proj(moving_path: str | Path,
-                      fixed_path: str | Path) -> tuple[sitk.Euler3DTransform, float]:
+                         fixed_path: str | Path,
+                         save: bool = True) -> tuple[sitk.Euler3DTransform, float]:
     """
     Rigidly register the median projection of `moving_path` to that of `fixed_path`, and save
     the moving median projection resampled onto the fixed grid as `median_proj_aligned.ome.tif`
@@ -62,9 +82,11 @@ def register_median_proj(moving_path: str | Path,
     Parameters
     ----------
     moving_path : str | Path
-        Path to the `sample#_run#` folder to align.
+        Path to the `sample#_run#` folder to align, or to an analysis folder inside it.
     fixed_path : str | Path
-        Path to the `sample#_run#` folder to align to.
+        Path to the `sample#_run#` folder to align to, or to an analysis folder inside it.
+    save : bool
+        Whether to save the aligned median projection and the transform (default True).
 
     Returns
     -------
@@ -73,12 +95,15 @@ def register_median_proj(moving_path: str | Path,
     float
         Correlation of the aligned and fixed median projections within their overlap.
     """
-    moving_path, fixed_path = Path(moving_path), Path(fixed_path)
-    fixed = _load_median_proj_sitk(fixed_path)
-    moving = _load_median_proj_sitk(moving_path)
-    if fixed.GetSize() != moving.GetSize() or fixed.GetSpacing() != moving.GetSpacing():
-        raise ValueError(f'{moving_path.name} and {fixed_path.name} have different grids '
-                         f'({moving.GetSize()} vs {fixed.GetSize()}).')
+    fixed = _load_median_proj_sitk(Path(fixed_path))
+    moving = _load_median_proj_sitk(Path(moving_path))
+    moving_path, analysis_path = _run_and_analysis(Path(moving_path))
+    fixed_path = _run_and_analysis(Path(fixed_path))[0]
+    # different sizes are fine (registration is in um, the moving image is resampled onto the
+    # fixed grid), e.g. runs with fewer scan steps
+    if fixed.GetSpacing() != moving.GetSpacing():
+        raise ValueError(f'{moving_path.name} and {fixed_path.name} have different voxel sizes '
+                         f'({moving.GetSpacing()} vs {fixed.GetSpacing()}).')
 
     # masks excluding the zero padding left by deskewing
     fixed_mask = sitk.Cast(fixed > 0, sitk.sitkUInt8)
@@ -128,17 +153,40 @@ def register_median_proj(moving_path: str | Path,
         correlation = np.corrcoef(fixed_arr[valid], arr[valid])[0, 1]
         print(f'Correlation with {fixed_path.name} {label}: {correlation:.4f}')
 
-    analysis_path = moving_path / scape_utils.ANALYSIS_PATH_NAME
-    voxel_size = scape_utils.load_voxel_size(moving_path)
-    tiff_metadata = {'axes': 'ZYX',
-                     'PhysicalSizeX': voxel_size['x'], 'PhysicalSizeXUnit': 'um',
-                     'PhysicalSizeY': voxel_size['y'], 'PhysicalSizeYUnit': 'um',
-                     'PhysicalSizeZ': voxel_size['z'], 'PhysicalSizeZUnit': 'um'}
-    tifffile.imwrite(analysis_path / 'median_proj_aligned.ome.tif',
-                     sitk.GetArrayFromImage(aligned), ome=True, metadata=tiff_metadata)
-    sitk.WriteTransform(rigid, str(analysis_path / 'median_proj_aligned.tfm'))
-    print(f'Saved median_proj_aligned.ome.tif and median_proj_aligned.tfm to {analysis_path}')
+    if save:
+        save_aligned(aligned, rigid, analysis_path / 'median_proj_aligned')
     return rigid, correlation
+
+
+def save_aligned(aligned: sitk.Image,
+                 transform: sitk.Transform,
+                 out_stem: Path) -> None:
+    """
+    Save an aligned median projection as `{out_stem}.ome.tif` (ZYX, calibrated with its spacing,
+    like the other projection OME-TIFFs) and its transform as `{out_stem}.tfm`.
+
+    Parameters
+    ----------
+    aligned : sitk.Image
+        Median projection resampled onto the fixed grid.
+    transform : sitk.Transform
+        Transform from fixed to moving physical space.
+    out_stem : Path
+        Output path without extension.
+
+    Returns
+    -------
+    None
+    """
+    spacing = aligned.GetSpacing()
+    tiff_metadata = {'axes': 'ZYX',
+                     'PhysicalSizeX': spacing[0], 'PhysicalSizeXUnit': 'um',
+                     'PhysicalSizeY': spacing[1], 'PhysicalSizeYUnit': 'um',
+                     'PhysicalSizeZ': spacing[2], 'PhysicalSizeZUnit': 'um'}
+    tifffile.imwrite(f'{out_stem}.ome.tif', sitk.GetArrayFromImage(aligned), ome=True,
+                     metadata=tiff_metadata)
+    sitk.WriteTransform(transform, f'{out_stem}.tfm')
+    print(f'Saved {out_stem.name}.ome.tif and .tfm to {out_stem.parent}')
 
 
 if __name__ == '__main__':
