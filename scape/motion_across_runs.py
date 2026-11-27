@@ -52,6 +52,9 @@ from register_median_proj import _load_median_proj_sitk, register_median_proj, s
 
 OUT_FOLDER_NAME = '00_motion-analysis'
 COMMON_SUBFOLDER = 'motion-analysis'  # in COMMON_FOLDER, for the plots of every experiment
+# y limits of the 4 panels of `plot_motion`, the same for every fly to compare them: they cover
+# the runs before eclosion of the first 4 experiments (larger shifts near eclosion fall off)
+YLIMS = ((-40, 40), (-2, 8), (0.7, 1.0), (0, 130))
 
 
 prev_keys = ('rot_x', 'rot_y', 'rot_z', 'tx', 'ty', 'tz', 'correlation')
@@ -86,7 +89,8 @@ def plot_motion(exp_path: str | Path) -> None:
     """
     Plot `{exp}/00_motion-analysis/motion_across_runs.csv` as `motion_across_runs.png`: the
     rotation and translation of the direct (solid) and chained (dashed) alignment to the first
-    run, the correlations, and the largest tissue bounding box corner displacements.
+    run, the correlations, and the largest tissue bounding box corner displacements, with the
+    same y limits for every experiment (`YLIMS`).
 
     Parameters
     ----------
@@ -122,6 +126,8 @@ def plot_motion(exp_path: str | Path) -> None:
     axes[3].set_ylabel('max tissue corner\ndisplacement (um)')
     axes[3].legend()
     axes[3].set_xlabel(f'hours since {fixed_name}')
+    for ax, ylim in zip(axes, YLIMS):
+        ax.set_ylim(ylim)
     fig.suptitle(f'{exp_path.name}: rigid motion of the median projection')
     fig.tight_layout()
     fig.savefig(out_path / 'motion_across_runs.png', dpi=150)
