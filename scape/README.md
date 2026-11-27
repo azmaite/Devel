@@ -50,10 +50,11 @@ so the runs of a sample can still be combined.
   to the first long run and to the previous run, plot the shifts, rotations and correlations
   over time, and save the median projections aligned with the chained run-to-previous
   transforms (in `{exp}/00_motion-analysis`). E.g. `python motion_across_runs.py exp_folder`.
-- `video_motion_runs.py`: video of the chain-aligned median projections (from
-  `motion_across_runs.py`) rotating about the long axis (x, vertical), one run per second, captioned `{run#}_{hours}hAPF`.
-  With `--original`, the same video of the unaligned medians, to compare.
-  E.g. `python video_motion_runs.py exp_folder [--original]`.
+- `video_motion_runs.py`: green-magenta overlay video (`median_overlay.mp4`) of the first run
+  (green) with each run in turn (magenta, 1/4 s each, captioned `{run#}_{hours}hAPF`), side by
+  side for the original, direct-aligned and chain-aligned median projections (from
+  `motion_across_runs.py`); each column shows the max projection over z (long axis x vertical)
+  on top and over x below. E.g. `python video_motion_runs.py exp_folder`.
 - `edit_labels_napari.py`: open a label tif in napari as an editable Labels layer next to the
   recording's projection.
 - `segment_muscles_activity.py`: naive split of leg segments (front femur and tibia, middle

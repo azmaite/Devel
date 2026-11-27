@@ -23,10 +23,11 @@ Outputs, in `{exp}/00_motion-analysis`:
   direct alignment solid and the chained one dashed (`plot_motion`; replot only with
   `--plot_only`); also copied to `_analysis/motion-analysis/motion_across_runs_YYYYMMDD.png`
   next to the experiment folders (in the SCAPE folder), to compare experiments,
-- `median_projections/`: `{run#}_median.ome.tif` (the median projection of each run, a copy) and
-  `{run#}_median_aligned_chained.ome.tif` (resampled onto the first run's grid with the chained
-  transform, which is saved next to it as `.tfm`), to compare runs, e.g. with
-  `video_motion_runs.py`.
+- `median_projections/`: `{run#}_median.ome.tif` (the median projection of each run, a copy),
+  `{run#}_median_aligned_direct.ome.tif` (a copy of the direct alignment's
+  `median_proj_aligned.ome.tif`) and `{run#}_median_aligned_chained.ome.tif` (resampled onto the
+  first run's grid with the chained transform), each with its transform as `.tfm`, to compare
+  runs, e.g. with `video_motion_runs.py`.
 
 Can be run from the terminal (`python motion_across_runs.py exp_folder`) or imported.
 
@@ -206,10 +207,8 @@ def motion_across_runs(exp_path: str | Path) -> pd.DataFrame:
     for run in runs:
         start = datetime.strptime('_'.join(run.name.split('_')[-2:]), '%Y%m%d_%H%M')
         row = dict(run=run.name, start=start)
-        median_file = scape_utils.analysis_path_for(run) / 'median_proj.ome.tif'
-        if sources[run] != run:
-            median_file = sources[run] / 'median_proj.ome.tif'
-        shutil.copy(median_file, proj_path / f'{run_id(run)}_median.ome.tif')
+        analysis = scape_utils.analysis_path_for(run) if sources[run] == run else sources[run]
+        shutil.copy(analysis / 'median_proj.ome.tif', proj_path / f'{run_id(run)}_median.ome.tif')
         if run == fixed:
             row.update({k: 0. for k in prev_keys}, correlation=1., seconds=0.)
             row.update({f'prev_{k}': v for k, v in row.items() if k in prev_keys})
@@ -222,6 +221,9 @@ def motion_across_runs(exp_path: str | Path) -> pd.DataFrame:
         row.update(_motion_row(direct, correlation))
         row['seconds'] = time.perf_counter() - t0
         print(f'  took {row["seconds"]:.0f} s')
+        for ext in ('.ome.tif', '.tfm'):
+            shutil.copy(analysis / f'median_proj_aligned{ext}',
+                        proj_path / f'{run_id(run)}_median_aligned_direct{ext}')
         if run != runs[1]:  # the previous run of runs[1] is the first run, already done
             prev, correlation = register_median_proj(sources[run],
                                                      sources[runs[runs.index(run) - 1]],
